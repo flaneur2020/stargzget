@@ -2,8 +2,6 @@ package stargzget
 
 import (
 	"fmt"
-
-	"github.com/opencontainers/go-digest"
 )
 
 // Error types for stargz-get operations
@@ -87,54 +85,6 @@ func (e *StargzError) WithMessage(message string) *StargzError {
 		Cause:   e.Cause,
 		Details: e.Details,
 	}
-}
-
-// NewBlobNotFoundError creates a blob not found error
-func NewBlobNotFoundError(blobDigest digest.Digest) error {
-	return ErrBlobNotFound.WithDetail("blobDigest", blobDigest.String())
-}
-
-// NewFileNotFoundError creates a file not found error
-func NewFileNotFoundError(path string, blobDigest digest.Digest) error {
-	err := ErrFileNotFound.WithDetail("path", path)
-	if blobDigest.String() != "" {
-		err = err.WithDetail("blobDigest", blobDigest.String())
-	}
-	return err
-}
-
-// NewManifestFetchError creates a manifest fetch error
-func NewManifestFetchError(imageRef string, cause error) error {
-	return ErrManifestFetch.
-		WithDetail("imageRef", imageRef).
-		WithCause(cause)
-}
-
-// NewTOCDownloadError creates a TOC download error
-func NewTOCDownloadError(blobDigest string, cause error) error {
-	return ErrTOCDownload.
-		WithDetail("blobDigest", blobDigest).
-		WithCause(cause)
-}
-
-// NewAuthError creates an authentication error
-func NewAuthError(cause error) error {
-	return ErrAuthFailed.WithCause(cause)
-}
-
-// NewInvalidDigestError creates an invalid digest error
-func NewInvalidDigestError(digestStr string, cause error) error {
-	return ErrInvalidDigest.
-		WithDetail("digest", digestStr).
-		WithCause(cause)
-}
-
-// NewDownloadError creates a download error
-func NewDownloadError(path string, attempts int, cause error) error {
-	return ErrDownloadFailed.
-		WithDetail("path", path).
-		WithDetail("attempts", attempts).
-		WithCause(cause)
 }
 
 // IsStargzError checks if an error is a StargzError

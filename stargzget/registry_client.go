@@ -85,7 +85,7 @@ func (c *registryClient) getAuthToken(ctx context.Context, registry, repository,
 	// Example: Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:stargz-containers/node:pull"
 
 	if !strings.HasPrefix(wwwAuthenticate, "Bearer ") {
-		return "", fmt.Errorf("unsupported auth scheme: %s", wwwAuthenticate)
+		return "", ErrAuthFailed.WithCause(fmt.Errorf("unsupported auth scheme: %s", wwwAuthenticate))
 	}
 
 	params := make(map[string]string)
@@ -106,7 +106,7 @@ func (c *registryClient) getAuthToken(ctx context.Context, registry, repository,
 	scope := params["scope"]
 
 	if realm == "" {
-		return "", fmt.Errorf("no realm in WWW-Authenticate header")
+		return "", ErrAuthFailed.WithCause(fmt.Errorf("no realm in WWW-Authenticate header"))
 	}
 
 	// Build token URL
@@ -114,23 +114,23 @@ func (c *registryClient) getAuthToken(ctx context.Context, registry, repository,
 
 	req, err := http.NewRequestWithContext(ctx, "GET", tokenURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create token request: %w", err)
+		return "", ErrAuthFailed.WithCause(err)
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch token: %w", err)
+		return "", ErrAuthFailed.WithCause(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
+		return "", ErrAuthFailed.WithCause(fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body)))
 	}
 
 	var authResp authResponse
 	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
-		return "", fmt.Errorf("failed to decode token response: %w", err)
+		return "", ErrAuthFailed.WithCause(err)
 	}
 
 	token := authResp.Token
@@ -144,7 +144,7 @@ func (c *registryClient) getAuthToken(ctx context.Context, registry, repository,
 func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Manifest, error) {
 	registry, repository, tag, err := parseImageRef(imageRef)
 	if err != nil {
-		return nil, err
+		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 	}
 
 	// Construct OCI registry API URL
@@ -152,7 +152,7 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 	}
 
 	// Set accept header for OCI manifest
@@ -164,7 +164,7 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
+		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 	}
 	defer resp.Body.Close()
 
@@ -173,18 +173,18 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 	if resp.StatusCode == http.StatusUnauthorized {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
 		if wwwAuth == "" {
-			return nil, fmt.Errorf("got 401 but no WWW-Authenticate header")
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("got 401 but no WWW-Authenticate header"))
 		}
 
 		token, err = c.getAuthToken(ctx, registry, repository, wwwAuth)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get auth token: %w", err)
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
 
 		// Retry with token
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
 		req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
 		req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
@@ -193,19 +193,19 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 
 		resp, err = c.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch manifest with token: %w", err)
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
 		defer resp.Body.Close()
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registry returned %d: %s", resp.StatusCode, string(body))
+		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("registry returned %d: %s", resp.StatusCode, string(body)))
 	}
 
 	var manifest Manifest
 	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
-		return nil, fmt.Errorf("failed to decode manifest: %w", err)
+		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 	}
 
 	// If it's an OCI index, fetch the first manifest
@@ -218,7 +218,7 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 		url = fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, manifestDigest)
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create manifest request: %w", err)
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
 		req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
 		req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
@@ -230,17 +230,17 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 
 		resp2, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch manifest by digest: %w", err)
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
 		defer resp2.Body.Close()
 
 		if resp2.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp2.Body)
-			return nil, fmt.Errorf("manifest request returned %d: %s", resp2.StatusCode, string(body))
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("manifest request returned %d: %s", resp2.StatusCode, string(body)))
 		}
 
 		if err := json.NewDecoder(resp2.Body).Decode(&manifest); err != nil {
-			return nil, fmt.Errorf("failed to decode manifest from index: %w", err)
+			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
 	}
 

@@ -122,20 +122,20 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, c
 	// Create target directory if needed
 	targetDir := filepath.Dir(job.OutputPath)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return err
+		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
 	// Create target file
 	outFile, err := os.Create(job.OutputPath)
 	if err != nil {
-		return err
+		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 	defer outFile.Close()
 
 	// Open the file from the image
 	fileReader, err := d.imageAccessor.OpenFile(ctx, job.Path, job.BlobDigest)
 	if err != nil {
-		return err
+		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
 	// Wrap fileReader with progress tracking if callback is provided
@@ -154,7 +154,7 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, c
 	// Copy file content to target
 	_, err = io.Copy(outFile, readerToUse)
 	if err != nil {
-		return err
+		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
 	return nil

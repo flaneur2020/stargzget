@@ -44,7 +44,7 @@ func (idx *ImageIndex) FindFile(path string, blobDigest digest.Digest) (*FileInf
 		// Search in all layers
 		info, ok := idx.files[path]
 		if !ok {
-			return nil, fmt.Errorf("file not found in index: %s", path)
+			return nil, ErrFileNotFound.WithDetail("path", path)
 		}
 		return info, nil
 	}
@@ -59,10 +59,10 @@ func (idx *ImageIndex) FindFile(path string, blobDigest digest.Digest) (*FileInf
 					Size:       size,
 				}, nil
 			}
-			return nil, fmt.Errorf("file %s not found in blob %s", path, blobDigest)
+			return nil, ErrFileNotFound.WithDetail("path", path).WithDetail("blobDigest", blobDigest.String())
 		}
 	}
-	return nil, fmt.Errorf("blob not found: %s", blobDigest)
+	return nil, ErrBlobNotFound.WithDetail("blobDigest", blobDigest.String())
 }
 
 // FilterFiles filters files based on path pattern and optional blob digest
@@ -193,7 +193,7 @@ func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string
 	}
 
 	if !bytes.Contains([]byte(wwwAuthenticate), []byte("Bearer ")) {
-		return "", fmt.Errorf("unsupported auth scheme: %s", wwwAuthenticate)
+		return "", ErrAuthFailed.WithCause(fmt.Errorf("unsupported auth scheme: %s", wwwAuthenticate))
 	}
 
 	params := make(map[string]string)
@@ -214,7 +214,7 @@ func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string
 	scope := params["scope"]
 
 	if realm == "" {
-		return "", fmt.Errorf("no realm in WWW-Authenticate header")
+		return "", ErrAuthFailed.WithCause(fmt.Errorf("no realm in WWW-Authenticate header"))
 	}
 
 	// Build token URL
@@ -222,18 +222,18 @@ func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string
 
 	req, err := http.NewRequestWithContext(ctx, "GET", tokenURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create token request: %w", err)
+		return "", ErrAuthFailed.WithCause(err)
 	}
 
 	resp, err := i.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch token: %w", err)
+		return "", ErrAuthFailed.WithCause(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
+		return "", ErrAuthFailed.WithCause(fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body)))
 	}
 
 	var authResp struct {
@@ -241,7 +241,7 @@ func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string
 		AccessToken string `json:"access_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
-		return "", fmt.Errorf("failed to decode token response: %w", err)
+		return "", ErrAuthFailed.WithCause(err)
 	}
 
 	token := authResp.Token
@@ -275,14 +275,14 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 	// Try to get the size first
 	size, err := blobReader.getSize()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get blob size: %w", err)
+		return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
 
 	// Get TOC offset using OpenFooter
 	sr := io.NewSectionReader(blobReader, 0, size)
 	tocOffset, _, err := estargz.OpenFooter(sr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open footer: %w", err)
+		return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
 
 	// Read TOC section (from tocOffset to end)
@@ -290,13 +290,13 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 	tocSection := make([]byte, tocSectionSize)
 	_, err = blobReader.ReadAt(tocSection, tocOffset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read TOC section: %w", err)
+		return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
 
 	// The TOC section is gzipped tar, decompress and find stargz.index.json
 	gzReader, err := gzip.NewReader(bytes.NewReader(tocSection))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create gzip reader for TOC: %w", err)
+		return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
 	defer gzReader.Close()
 
@@ -308,19 +308,19 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to read tar entry: %w", err)
+			return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 		}
 
 		// Look for stargz.index.json
 		if header.Name == "stargz.index.json" {
 			tocJSONBytes, err := io.ReadAll(tarReader)
 			if err != nil {
-				return nil, fmt.Errorf("failed to read TOC JSON: %w", err)
+				return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 			}
 
 			var toc estargz.JTOC
 			if err := json.Unmarshal(tocJSONBytes, &toc); err != nil {
-				return nil, fmt.Errorf("failed to parse TOC JSON: %w", err)
+				return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 			}
 
 			// Cache it
@@ -330,7 +330,7 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 		}
 	}
 
-	return nil, fmt.Errorf("stargz.index.json not found in TOC section")
+	return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(fmt.Errorf("stargz.index.json not found in TOC section"))
 }
 
 // httpBlobReader implements io.ReaderAt for HTTP range requests

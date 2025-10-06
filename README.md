@@ -1,6 +1,6 @@
 # stargz-get
 
-A lightweight CLI tool for downloading files from stargz (seekable tar.gz) container images without pulling the entire image.
+A lightweight CLI tool for downloading files from stargz (seekable tar.gz) container images without pulling & mount the image.
 
 ## Features
 

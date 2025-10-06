@@ -81,88 +81,63 @@ func TestStargzError_WithMessage(t *testing.T) {
 	}
 }
 
-func TestNewBlobNotFoundError(t *testing.T) {
-	digest := digest.FromString("test-blob")
-	err := NewBlobNotFoundError(digest)
+func TestBlobNotFoundError_WithDetail(t *testing.T) {
+	dgst := digest.FromString("test-blob")
+	err := ErrBlobNotFound.WithDetail("blobDigest", dgst.String())
 
-	stargzErr, ok := err.(*StargzError)
-	if !ok {
-		t.Fatal("NewBlobNotFoundError() should return *StargzError")
+	if err.Code != "BLOB_NOT_FOUND" {
+		t.Errorf("Code = %q, want BLOB_NOT_FOUND", err.Code)
 	}
 
-	if stargzErr.Code != "BLOB_NOT_FOUND" {
-		t.Errorf("Code = %q, want BLOB_NOT_FOUND", stargzErr.Code)
-	}
-
-	if stargzErr.Details["blobDigest"] != digest.String() {
-		t.Errorf("blobDigest detail = %v, want %v", stargzErr.Details["blobDigest"], digest.String())
+	if err.Details["blobDigest"] != dgst.String() {
+		t.Errorf("blobDigest detail = %v, want %v", err.Details["blobDigest"], dgst.String())
 	}
 }
 
-func TestNewFileNotFoundError(t *testing.T) {
-	digest := digest.FromString("test-blob")
-	err := NewFileNotFoundError("/bin/echo", digest)
+func TestFileNotFoundError_WithDetail(t *testing.T) {
+	dgst := digest.FromString("test-blob")
+	err := ErrFileNotFound.WithDetail("path", "/bin/echo").WithDetail("blobDigest", dgst.String())
 
-	stargzErr, ok := err.(*StargzError)
-	if !ok {
-		t.Fatal("NewFileNotFoundError() should return *StargzError")
+	if err.Details["path"] != "/bin/echo" {
+		t.Errorf("path detail = %v, want /bin/echo", err.Details["path"])
 	}
 
-	if stargzErr.Details["path"] != "/bin/echo" {
-		t.Errorf("path detail = %v, want /bin/echo", stargzErr.Details["path"])
-	}
-
-	if stargzErr.Details["blobDigest"] != digest.String() {
-		t.Errorf("blobDigest detail = %v, want %v", stargzErr.Details["blobDigest"], digest.String())
+	if err.Details["blobDigest"] != dgst.String() {
+		t.Errorf("blobDigest detail = %v, want %v", err.Details["blobDigest"], dgst.String())
 	}
 }
 
-func TestNewFileNotFoundError_WithoutDigest(t *testing.T) {
-	err := NewFileNotFoundError("/bin/echo", "")
+func TestFileNotFoundError_WithoutDigest(t *testing.T) {
+	err := ErrFileNotFound.WithDetail("path", "/bin/echo")
 
-	stargzErr, ok := err.(*StargzError)
-	if !ok {
-		t.Fatal("NewFileNotFoundError() should return *StargzError")
+	if err.Details["path"] != "/bin/echo" {
+		t.Errorf("path detail = %v, want /bin/echo", err.Details["path"])
 	}
 
-	if stargzErr.Details["path"] != "/bin/echo" {
-		t.Errorf("path detail = %v, want /bin/echo", stargzErr.Details["path"])
-	}
-
-	if _, exists := stargzErr.Details["blobDigest"]; exists {
-		t.Error("blobDigest should not be in details when empty")
+	if _, exists := err.Details["blobDigest"]; exists {
+		t.Error("blobDigest should not be in details when not added")
 	}
 }
 
-func TestNewManifestFetchError(t *testing.T) {
+func TestManifestFetchError_WithDetail(t *testing.T) {
 	cause := errors.New("network error")
-	err := NewManifestFetchError("ghcr.io/test/image:latest", cause)
+	err := ErrManifestFetch.WithDetail("imageRef", "ghcr.io/test/image:latest").WithCause(cause)
 
-	stargzErr, ok := err.(*StargzError)
-	if !ok {
-		t.Fatal("NewManifestFetchError() should return *StargzError")
+	if err.Code != "MANIFEST_FETCH_FAILED" {
+		t.Errorf("Code = %q, want MANIFEST_FETCH_FAILED", err.Code)
 	}
 
-	if stargzErr.Code != "MANIFEST_FETCH_FAILED" {
-		t.Errorf("Code = %q, want MANIFEST_FETCH_FAILED", stargzErr.Code)
-	}
-
-	if stargzErr.Cause != cause {
-		t.Errorf("Cause = %v, want %v", stargzErr.Cause, cause)
+	if err.Cause != cause {
+		t.Errorf("Cause = %v, want %v", err.Cause, cause)
 	}
 }
 
-func TestNewDownloadError(t *testing.T) {
+func TestDownloadError_WithDetail(t *testing.T) {
 	cause := errors.New("io error")
-	err := NewDownloadError("/bin/echo", 3, cause)
+	err := ErrDownloadFailed.WithDetail("path", "/bin/echo").WithDetail("attempts", 3).WithCause(cause)
 
-	stargzErr, ok := err.(*StargzError)
-	if !ok {
-		t.Fatal("NewDownloadError() should return *StargzError")
-	}
-
-	if stargzErr.Details["attempts"] != 3 {
-		t.Errorf("attempts detail = %v, want 3", stargzErr.Details["attempts"])
+	if err.Details["attempts"] != 3 {
+		t.Errorf("attempts detail = %v, want 3", err.Details["attempts"])
 	}
 }
 
@@ -211,7 +186,7 @@ func TestGetErrorCode(t *testing.T) {
 		},
 		{
 			name: "StargzError with modifications",
-			err:  NewBlobNotFoundError(digest.FromString("test")),
+			err:  ErrBlobNotFound.WithDetail("blobDigest", digest.FromString("test").String()),
 			want: "BLOB_NOT_FOUND",
 		},
 		{
