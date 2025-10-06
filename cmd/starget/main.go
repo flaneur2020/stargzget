@@ -43,8 +43,8 @@ func main() {
 
 	// get command
 	getCmd := &cobra.Command{
-		Use:   "get <REGISTRY>/<IMAGE>:<TAG> <BLOB> <FILE_PATH> [OUTPUT_DIR]",
-		Short: "Download file(s) from a blob. Use '.' or '*' as FILE_PATH to download all files",
+		Use:   "get <REGISTRY>/<IMAGE>:<TAG> <BLOB> <PATH> [OUTPUT_DIR]",
+		Short: "Download file or directory from a blob. Use '.' or '/' for all files, or specify a directory path",
 		Args:  cobra.RangeArgs(3, 4),
 		Run:   runGet,
 	}
@@ -127,9 +127,9 @@ func runLs(cmd *cobra.Command, args []string) {
 func runGet(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 	blobDigest := args[1]
-	filePath := args[2]
+	path := args[2]
 
-	outputPath := filePath
+	outputPath := path
 	if len(args) > 3 {
 		outputPath = args[3]
 	}
@@ -150,13 +150,18 @@ func runGet(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Check if downloading all files
-	downloadAll := filePath == "." || filePath == "*"
+	// Check if downloading directory or all files
+	isDir := path == "." || path == "/" || path == "*" || strings.HasSuffix(path, "/")
 
-	if downloadAll {
-		runGetAll(blobAccessor, downloader, dgst, outputPath)
+	if isDir {
+		// Normalize path for directory download
+		dirPath := path
+		if path == "*" {
+			dirPath = "."
+		}
+		runGetDir(blobAccessor, downloader, dgst, dirPath, outputPath)
 	} else {
-		runGetSingle(blobAccessor, downloader, dgst, filePath, outputPath)
+		runGetSingle(blobAccessor, downloader, dgst, path, outputPath)
 	}
 }
 
@@ -207,7 +212,7 @@ func runGetSingle(blobAccessor stargzget.BlobAccessor, downloader stargzget.Down
 	}
 }
 
-func runGetAll(blobAccessor stargzget.BlobAccessor, downloader stargzget.Downloader, dgst digest.Digest, outputDir string) {
+func runGetDir(blobAccessor stargzget.BlobAccessor, downloader stargzget.Downloader, dgst digest.Digest, dirPath, outputDir string) {
 	ctx := context.Background()
 
 	// Progress bar is enabled by default
@@ -222,7 +227,7 @@ func runGetAll(blobAccessor stargzget.BlobAccessor, downloader stargzget.Downloa
 		// Create a wrapper callback that initializes the progress bar once we know the total size
 		progressCallback = func(current, total int64) {
 			if !initOnce && total > 0 {
-				bar = progressbar.DefaultBytes(total, "Downloading all files")
+				bar = progressbar.DefaultBytes(total, "Downloading directory")
 				initOnce = true
 				totalSizeKnown = true
 			}
@@ -232,7 +237,7 @@ func runGetAll(blobAccessor stargzget.BlobAccessor, downloader stargzget.Downloa
 		}
 	}
 
-	stats, err := downloader.DownloadAll(ctx, dgst, outputDir, progressCallback)
+	stats, err := downloader.DownloadDir(ctx, dgst, dirPath, outputDir, progressCallback)
 	if err != nil {
 		if showProgress {
 			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)

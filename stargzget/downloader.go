@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/opencontainers/go-digest"
 )
@@ -25,7 +26,9 @@ type DownloadStats struct {
 
 type Downloader interface {
 	DownloadFile(ctx context.Context, blobDigest digest.Digest, fileName string, targetPath string, progress ProgressCallback) error
-	DownloadAll(ctx context.Context, blobDigest digest.Digest, outputDir string, progress ProgressCallback) (*DownloadStats, error)
+	// DownloadDir downloads files from a directory in the blob recursively
+	// dirPath: directory to download (use "." or "/" for all files)
+	DownloadDir(ctx context.Context, blobDigest digest.Digest, dirPath string, outputDir string, progress ProgressCallback) (*DownloadStats, error)
 }
 
 type downloader struct {
@@ -89,11 +92,47 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 	return nil
 }
 
-func (d *downloader) DownloadAll(ctx context.Context, blobDigest digest.Digest, outputDir string, progress ProgressCallback) (*DownloadStats, error) {
+func (d *downloader) DownloadDir(ctx context.Context, blobDigest digest.Digest, dirPath string, outputDir string, progress ProgressCallback) (*DownloadStats, error) {
 	// List all files
-	files, err := d.blobAccessor.ListFiles(ctx, blobDigest)
+	allFiles, err := d.blobAccessor.ListFiles(ctx, blobDigest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+
+	if len(allFiles) == 0 {
+		return &DownloadStats{}, nil
+	}
+
+	// Normalize dirPath
+	if dirPath == "" || dirPath == "." || dirPath == "/" {
+		dirPath = "" // Download all files
+	} else {
+		// Ensure dirPath starts with / and doesn't end with /
+		if !strings.HasPrefix(dirPath, "/") {
+			dirPath = "/" + dirPath
+		}
+		dirPath = filepath.Clean(dirPath)
+	}
+
+	// Filter files based on dirPath
+	var files []string
+	if dirPath == "" {
+		// Download all files
+		files = allFiles
+	} else {
+		// Only download files under dirPath
+		for _, file := range allFiles {
+			// Ensure file path starts with /
+			filePath := file
+			if !strings.HasPrefix(filePath, "/") {
+				filePath = "/" + filePath
+			}
+
+			// Check if file is under dirPath
+			if strings.HasPrefix(filePath, dirPath+"/") || filePath == dirPath {
+				files = append(files, file)
+			}
+		}
 	}
 
 	if len(files) == 0 {
