@@ -23,7 +23,7 @@ go build -o starget ./cmd/starget
 
 List image layers:
 ```bash
-starget layers ghcr.io/stargz-containers/node:13.13.0-esgz
+starget info ghcr.io/stargz-containers/node:13.13.0-esgz
 ```
 
 List files in a specific layer:
@@ -55,12 +55,12 @@ starget get ghcr.io/stargz-containers/node:13.13.0-esgz \
 
 ## Commands
 
-### `starget layers`
+### `starget info`
 
 List all layers in an image.
 
 ```bash
-starget layers <REGISTRY>/<IMAGE>:<TAG>
+starget info <REGISTRY>/<IMAGE>:<TAG>
 ```
 
 ### `starget ls`

@@ -70,7 +70,7 @@
 
 **Completed**:
 - [x] Implement Cobra-based CLI with subcommands
-- [x] `starget layers` - List all layers in image
+- [x] `starget info` - List all layers in image
 - [x] `starget ls` - List files in a blob
 - [x] `starget get` - Download files with pattern matching
 - [x] Add `--no-progress` flag

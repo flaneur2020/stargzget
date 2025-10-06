@@ -26,12 +26,12 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVar(&credential, "credential", "", "Registry credential in format USER:PASSWORD")
 
-	// layers command
-	layersCmd := &cobra.Command{
-		Use:   "layers <REGISTRY>/<IMAGE>:<TAG>",
+	// info command
+	infoCmd := &cobra.Command{
+		Use:   "info <REGISTRY>/<IMAGE>:<TAG>",
 		Short: "List all layers in an image",
 		Args:  cobra.ExactArgs(1),
-		Run:   runLayers,
+		Run:   runInfo,
 	}
 
 	// ls command
@@ -51,7 +51,7 @@ func main() {
 	}
 	getCmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress bar (progress is enabled by default)")
 
-	rootCmd.AddCommand(layersCmd, lsCmd, getCmd)
+	rootCmd.AddCommand(infoCmd, lsCmd, getCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -77,7 +77,7 @@ func parseImageRef(imageRef string) (string, string, error) {
 	return registry, repository, nil
 }
 
-func runLayers(cmd *cobra.Command, args []string) {
+func runInfo(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 
 	client := stargzget.NewRegistryClient()
