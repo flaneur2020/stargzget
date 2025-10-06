@@ -15,8 +15,17 @@ import (
 // total: total file size (may be -1 if unknown)
 type ProgressCallback func(current int64, total int64)
 
+// DownloadStats contains statistics about a download operation
+type DownloadStats struct {
+	TotalFiles      int
+	TotalBytes      int64
+	DownloadedFiles int
+	DownloadedBytes int64
+}
+
 type Downloader interface {
 	DownloadFile(ctx context.Context, blobDigest digest.Digest, fileName string, targetPath string, progress ProgressCallback) error
+	DownloadAll(ctx context.Context, blobDigest digest.Digest, outputDir string, progress ProgressCallback) (*DownloadStats, error)
 }
 
 type downloader struct {
@@ -78,6 +87,77 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 	}
 
 	return nil
+}
+
+func (d *downloader) DownloadAll(ctx context.Context, blobDigest digest.Digest, outputDir string, progress ProgressCallback) (*DownloadStats, error) {
+	// List all files
+	files, err := d.blobAccessor.ListFiles(ctx, blobDigest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+
+	if len(files) == 0 {
+		return &DownloadStats{}, nil
+	}
+
+	// Get metadata for all files and calculate total size
+	type fileInfo struct {
+		path     string
+		metadata *FileMetadata
+	}
+
+	var fileInfos []fileInfo
+	var totalSize int64
+
+	for _, file := range files {
+		metadata, err := d.blobAccessor.GetFileMetadata(ctx, blobDigest, file)
+		if err != nil {
+			// Skip files that fail metadata retrieval
+			continue
+		}
+		fileInfos = append(fileInfos, fileInfo{path: file, metadata: metadata})
+		totalSize += metadata.Size
+	}
+
+	stats := &DownloadStats{
+		TotalFiles: len(fileInfos),
+		TotalBytes: totalSize,
+	}
+
+	// Notify the callback of total size before starting
+	if progress != nil {
+		progress(0, totalSize)
+	}
+
+	var currentTotal int64
+
+	// Download each file
+	for _, info := range fileInfos {
+		// Construct output path maintaining directory structure
+		outputPath := filepath.Clean(info.path)
+		// Remove leading slash if present
+		outputPath = filepath.Join(outputDir, outputPath)
+
+		var progressCallback ProgressCallback
+		if progress != nil {
+			// Update total progress bar
+			progressCallback = func(current, total int64) {
+				progress(currentTotal+current, totalSize)
+			}
+		}
+
+		err = d.DownloadFile(ctx, blobDigest, info.path, outputPath, progressCallback)
+		if err != nil {
+			// Continue with next file on error
+			continue
+		}
+
+		currentTotal += info.metadata.Size
+		stats.DownloadedFiles++
+		stats.DownloadedBytes += info.metadata.Size
+	}
+
+	return stats, nil
 }
 
 // progressReader wraps an io.Reader to report download progress

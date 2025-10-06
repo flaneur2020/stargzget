@@ -210,89 +210,50 @@ func runGetSingle(blobAccessor stargzget.BlobAccessor, downloader stargzget.Down
 func runGetAll(blobAccessor stargzget.BlobAccessor, downloader stargzget.Downloader, dgst digest.Digest, outputDir string) {
 	ctx := context.Background()
 
-	// List all files
-	files, err := blobAccessor.ListFiles(ctx, dgst)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error listing files: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(files) == 0 {
-		fmt.Println("No files to download")
-		return
-	}
-
-	// Get metadata for all files and calculate total size
-	type fileInfo struct {
-		path     string
-		metadata *stargzget.FileMetadata
-	}
-
-	var fileInfos []fileInfo
-	var totalSize int64
-
-	for _, file := range files {
-		metadata, err := blobAccessor.GetFileMetadata(ctx, dgst, file)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting metadata for %s: %v\n", file, err)
-			continue
-		}
-		fileInfos = append(fileInfos, fileInfo{path: file, metadata: metadata})
-		totalSize += metadata.Size
-	}
-
-	fmt.Printf("Downloading %d files (%d bytes total)...\n", len(fileInfos), totalSize)
-
 	// Progress bar is enabled by default
 	showProgress := !noProgress
 
 	var bar *progressbar.ProgressBar
-	var currentTotal int64
+	var progressCallback stargzget.ProgressCallback
+	var totalSizeKnown bool
+	var initOnce bool
 
 	if showProgress {
-		bar = progressbar.DefaultBytes(
-			totalSize,
-			"Downloading all files",
-		)
+		// Create a wrapper callback that initializes the progress bar once we know the total size
+		progressCallback = func(current, total int64) {
+			if !initOnce && total > 0 {
+				bar = progressbar.DefaultBytes(total, "Downloading all files")
+				initOnce = true
+				totalSizeKnown = true
+			}
+			if bar != nil {
+				bar.Set64(current)
+			}
+		}
 	}
 
-	// Download each file
-	for i, info := range fileInfos {
-		// Construct output path maintaining directory structure
-		outputPath := strings.TrimPrefix(info.path, "/")
-		if outputDir != "." && outputDir != "" {
-			outputPath = outputDir + "/" + outputPath
-		}
-
-		var progressCallback stargzget.ProgressCallback
+	stats, err := downloader.DownloadAll(ctx, dgst, outputDir, progressCallback)
+	if err != nil {
 		if showProgress {
-			// Update total progress bar
-			progressCallback = func(current, total int64) {
-				bar.Set64(currentTotal + current)
-			}
+			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		} else {
-			fmt.Printf("[%d/%d] Downloading %s (%d bytes)...\n", i+1, len(fileInfos), info.path, info.metadata.Size)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
+		os.Exit(1)
+	}
 
-		err = downloader.DownloadFile(ctx, dgst, info.path, outputPath, progressCallback)
-		if err != nil {
-			if showProgress {
-				fmt.Fprintf(os.Stderr, "\nError downloading %s: %v\n", info.path, err)
-			} else {
-				fmt.Fprintf(os.Stderr, "Error downloading %s: %v\n", info.path, err)
-			}
-			continue
-		}
-
-		currentTotal += info.metadata.Size
-		if !showProgress {
-			fmt.Printf("[%d/%d] Downloaded %s\n", i+1, len(fileInfos), info.path)
-		}
+	if stats.TotalFiles == 0 {
+		fmt.Println("No files to download")
+		return
 	}
 
 	if showProgress {
-		fmt.Printf("\nSuccessfully downloaded %d files (%d bytes total)\n", len(fileInfos), totalSize)
+		if !totalSizeKnown {
+			fmt.Printf("\nDownloaded %d files (%d bytes total)\n", stats.DownloadedFiles, stats.DownloadedBytes)
+		} else {
+			fmt.Printf("\nSuccessfully downloaded %d/%d files (%d bytes total)\n", stats.DownloadedFiles, stats.TotalFiles, stats.DownloadedBytes)
+		}
 	} else {
-		fmt.Printf("Successfully downloaded %d files (%d bytes total)\n", len(fileInfos), totalSize)
+		fmt.Printf("Successfully downloaded %d/%d files (%d bytes total)\n", stats.DownloadedFiles, stats.TotalFiles, stats.DownloadedBytes)
 	}
 }
