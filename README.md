@@ -11,48 +11,26 @@ A lightweight CLI tool for downloading files from stargz (seekable tar.gz) conta
 - **Layer Inspection**: List and explore stargz image layers
 - **Public Registry Support**: Works with public registries like ghcr.io
 
-## Installation
+## Quick Start
+
+### Installation
 
 ```bash
 go build -o starget ./cmd/starget
 ```
 
-## Usage
+### Usage Examples
 
-### List Image Layers
-
-```bash
-starget layers <REGISTRY>/<IMAGE>:<TAG>
-```
-
-Example:
+List image layers:
 ```bash
 starget layers ghcr.io/stargz-containers/node:13.13.0-esgz
 ```
 
-### List Files in a Blob
-
+List files in a specific layer:
 ```bash
-starget ls <REGISTRY>/<IMAGE>:<TAG> <BLOB_DIGEST>
+starget ls ghcr.io/stargz-containers/node:13.13.0-esgz \
+  sha256:c411ef59488b73d06c19343d72eb816549577b3e0429516dcca5789d7a9a4000
 ```
-
-Example:
-```bash
-starget ls ghcr.io/stargz-containers/node:13.13.0-esgz sha256:c411ef59488b73d06c19343d72eb816549577b3e0429516dcca5789d7a9a4000
-```
-
-### Download Files
-
-```bash
-starget get <REGISTRY>/<IMAGE>:<TAG> <BLOB_DIGEST> <PATH_PATTERN> [OUTPUT_DIR]
-```
-
-**Path Pattern Options:**
-- Specific file: `bin/echo`
-- Directory: `bin/` or `bin`
-- All files: `.` or `/`
-
-**Examples:**
 
 Download a single file:
 ```bash
@@ -75,44 +53,50 @@ starget get ghcr.io/stargz-containers/node:13.13.0-esgz \
   . output/
 ```
 
-### Flags
+## Commands
 
-- `--no-progress`: Disable progress bar (progress is enabled by default)
+### `starget layers`
+
+List all layers in an image.
+
+```bash
+starget layers <REGISTRY>/<IMAGE>:<TAG>
+```
+
+### `starget ls`
+
+List files in a specific blob/layer.
+
+```bash
+starget ls <REGISTRY>/<IMAGE>:<TAG> <BLOB_DIGEST>
+```
+
+### `starget get`
+
+Download files from a blob/layer.
+
+```bash
+starget get <REGISTRY>/<IMAGE>:<TAG> <BLOB_DIGEST> <PATH_PATTERN> [OUTPUT_DIR]
+```
+
+**Path Patterns:**
+- Specific file: `bin/echo`
+- Directory: `bin/` or `bin`
+- All files: `.` or `/`
+
+**Flags:**
+- `--no-progress`: Disable progress bar (useful for scripts)
 
 ## Architecture
 
-### Core Components
+stargz-get uses a modular architecture with the following components:
 
-#### `RegistryClient`
-Handles OCI registry communication:
-- Fetches image manifests
-- Supports public registries
+- **RegistryClient**: Fetches image manifests from OCI registries
+- **ImageAccessor**: Manages lazy access to stargz layers via TOC downloads
+- **ImageIndex**: Provides fast file lookup and filtering across layers
+- **Downloader**: Orchestrates downloads with progress tracking and retry logic
 
-#### `ImageAccessor`
-Manages stargz image access:
-- **`ImageIndex()`**: Builds an index of all files across all layers
-- **`OpenFile()`**: Opens a specific file for reading
-
-Key features:
-- Downloads only the stargz TOC (Table of Contents), not the entire blob
-- Caches TOC for efficient repeated access
-- Uses HTTP range requests for lazy loading
-
-#### `ImageIndex`
-Provides file lookup and filtering:
-- **`FindFile(path, blobDigest)`**: Finds a specific file (blobDigest optional)
-- **`FilterFiles(pattern, blobDigest)`**: Filters files by pattern and optional blob digest
-
-#### `Downloader`
-Unified download interface:
-- **`StartDownload(jobs, progress, options)`**: Downloads multiple files with progress tracking
-- **`DownloadJob`**: Represents a single file download task
-- **`DownloadOptions`**: Configures retry behavior (default: 3 retries)
-
-Features:
-- Automatic retry on failure
-- Progress tracking across all downloads
-- Concurrent-safe progress reporting
+For detailed architecture and design decisions, see [DESIGN.md](DESIGN.md).
 
 ## Development
 
@@ -124,61 +108,50 @@ go test ./stargzget -v
 
 # Run specific test
 go test ./stargzget -v -run TestImageIndex_FilterFiles
+
+# Run tests with coverage
+go test ./stargzget -cover
 ```
 
 ### Test Coverage
 
-- `TestImageIndex_FilterFiles`: Tests file pattern matching and filtering
-- `TestImageIndex_FindFile`: Tests file lookup with optional blob digest
-- `TestDownloader_StartDownload`: Tests download workflow and progress tracking
-- `TestDownloader_StartDownload_WithRetries`: Tests retry logic with simulated failures
+The project has comprehensive test coverage including:
+- Unit tests with mocked dependencies
+- Integration tests with real stargz images
+- Retry logic validation
+- Error handling tests
+
+See [DESIGN.md](DESIGN.md#testing-strategy) for more details.
 
 ## Project Status
 
-### ✅ Completed Features
+**Current Version**: v0.1.0 (MVP)
 
-- [x] **Phase 1**: Registry Manifest Access
-  - RegistryClient.GetManifest() for public registries
-  - Manifest parsing and layer extraction
+### Completed ✅
+- Registry manifest access
+- Stargz TOC parsing and lazy loading
+- File download with pattern matching
+- CLI interface with progress tracking
+- Automatic retry logic
+- Structured error handling
+- Comprehensive unit tests
 
-- [x] **Phase 2**: Stargz Index Parsing
-  - TOC download and parsing using estargz library
-  - File metadata extraction
-  - ImageIndex for fast file lookup
+### In Progress 🚧
+- Authentication support for private registries
+- Multi-threaded downloads
+- Checksum verification
 
-- [x] **Phase 3**: File Download
-  - HTTP range requests for lazy loading
-  - Single file and directory downloads
-  - Unified download interface with DownloadJob
+See [ROADMAP.md](ROADMAP.md) for detailed development plan.
 
-- [x] **Phase 5**: CLI Interface
-  - Cobra-based CLI with subcommands
-  - Pattern-based file filtering
-  - Progress bar integration
+## How It Works
 
-- [x] **Phase 8**: Error Handling & Retry
-  - Automatic retry with configurable max retries
-  - Graceful error handling
-  - Failed file tracking in statistics
+1. **Fetch Manifest**: Get layer information from the registry
+2. **Download TOC**: Fetch only the Table of Contents (typically 0.1-1% of blob size)
+3. **Build Index**: Create a fast lookup index of all files across all layers
+4. **Filter Files**: Match files based on user's path pattern
+5. **Download On-Demand**: Use HTTP range requests to fetch only requested files
 
-- [x] **Phase 9**: Developer Experience
-  - Progress bar with download speed
-  - `--no-progress` flag
-  - Detailed download statistics
-  - Help text for all commands
-
-- [x] **Phase 10**: Testing
-  - Comprehensive unit tests with mocks
-  - Test coverage for core components
-  - Retry logic validation
-
-### 🚧 Future Enhancements
-
-- [ ] **Authentication Support**: Private registry access with credentials
-- [ ] **Multi-threaded Downloading**: Parallel chunk downloads for performance
-- [ ] **Checksum Verification**: Verify downloaded file integrity
-- [ ] **Exponential Backoff**: Smarter retry delays
-- [ ] **Verbose Logging**: `--verbose` flag for debugging
+This approach is much faster and more efficient than pulling the entire image.
 
 ## Design Philosophy
 
@@ -187,18 +160,42 @@ go test ./stargzget -v -run TestImageIndex_FilterFiles
 - **Lightweight**: No daemon, no complex dependencies
 - **Efficient**: Download only what you need using lazy loading
 
+See [DESIGN.md](DESIGN.md#design-philosophy) for more details.
+
+## Limitations
+
+- Only supports stargz/eStargz format images (not regular tar.gz)
+- Public registries only (authentication coming soon)
+- Sequential downloads (parallel downloads planned)
+
 ## Non-goals
 
 - Full OCI image management (use containerd/Docker for that)
 - Support for non-stargz image formats
 - Image building or pushing
 
-## License
+## Contributing
 
-This is a learning/demonstration project.
+Contributions are welcome! Areas where you can help:
+- Implement authentication support
+- Add checksum verification
+- Improve error messages
+- Write additional tests
+
+See [ROADMAP.md](ROADMAP.md#contributing) for good first issues.
+
+## Documentation
+
+- [DESIGN.md](DESIGN.md) - Architecture and design decisions
+- [ROADMAP.md](ROADMAP.md) - Development roadmap and future plans
+- [errors.go](stargzget/errors.go) - Error handling reference
 
 ## References
 
 - [Stargz Snapshotter](https://github.com/containerd/stargz-snapshotter)
 - [eStargz Specification](https://github.com/containerd/stargz-snapshotter/blob/main/docs/estargz.md)
 - [OCI Distribution Spec](https://github.com/opencontainers/distribution-spec)
+
+## License
+
+This is a learning/demonstration project.
