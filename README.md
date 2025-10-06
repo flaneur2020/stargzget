@@ -5,7 +5,9 @@ stargz-get is a tool to download stargz images from a registry to a local direct
 ## Usage
 
 ```bash
-stargz-get <REGISTRY>/<IMAGE>:<TAG>/<PATH> <TARGET_DIR> --credential=<USER:PASSWORD> [--blob-digest=<BLOB_DIGEST>]
+starget layers <REGISTRY>/<IMAGE>:<TAG> --credential=<USER:PASSWORD>
+starget ls <REGISTRY>/<IMAGE>:<TAG> <BLOB> --credential=<USER:PASSWORD>
+starget get <REGISTRY>/<IMAGE>:<TAG> <BLOB> <PATH> --credential=<USER:PASSWORD>
 ```
 
 ## Features

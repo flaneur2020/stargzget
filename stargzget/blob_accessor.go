@@ -18,6 +18,9 @@ type BlobAccessor interface {
 	ListFiles(ctx context.Context, blobDigest digest.Digest) ([]string, error)
 
 	GetFileMetadata(ctx context.Context, blobDigest digest.Digest, fileName string) (*FileMetadata, error)
+
+	// OpenReader opens the stargz blob as a reader
+	OpenReader(ctx context.Context, blobDigest digest.Digest) (*estargz.Reader, error)
 }
 
 type FileMetadata struct {
@@ -332,4 +335,33 @@ func (b *blobAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Di
 	}
 
 	return nil, fmt.Errorf("file not found: %s", fileName)
+}
+
+func (b *blobAccessor) OpenReader(ctx context.Context, blobDigest digest.Digest) (*estargz.Reader, error) {
+	// Construct blob URL
+	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", b.registry, b.repository, blobDigest.String())
+
+	// Create a blob reader
+	blobReader := &httpBlobReader{
+		client:       b.httpClient,
+		url:          blobURL,
+		authToken:    &b.authToken,
+		ctx:          ctx,
+		blobAccessor: b,
+	}
+
+	// Get blob size
+	size, err := blobReader.getSize()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get blob size: %w", err)
+	}
+
+	// Open the stargz blob
+	sr := io.NewSectionReader(blobReader, 0, size)
+	reader, err := estargz.Open(sr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stargz: %w", err)
+	}
+
+	return reader, nil
 }
