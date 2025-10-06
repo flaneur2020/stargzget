@@ -143,6 +143,7 @@
 - [ ] Add job queue with concurrency control
 - [ ] Coordinate progress tracking across workers
 - [ ] Add rate limiting to respect registry limits
+- [ ] **Parallel download for single large file**: Split large files into chunks and download in parallel
 - [ ] **Validation**: Compare download time vs sequential download
 
 **Design Considerations**:
@@ -150,6 +151,12 @@
 - Channel-based job distribution
 - Mutex-protected progress updates
 - Configurable via `--concurrency` flag
+- For single file parallel download:
+  - Detect file size threshold (e.g., > 10MB)
+  - Split into chunks (e.g., 4MB each)
+  - Use HTTP Range requests for concurrent chunk downloads
+  - Reassemble chunks in correct order
+  - Handle chunk retry independently
 
 **Estimated Effort**: Medium (2-3 days)
 
