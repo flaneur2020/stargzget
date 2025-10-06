@@ -103,8 +103,16 @@ func runLs(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Get manifest first
 	registryClient := stargzget.NewRegistryClient()
-	blobAccessor := stargzget.NewBlobAccessor(registryClient, registry, repository)
+	manifest, err := registryClient.GetManifest(context.Background(), imageRef)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting manifest: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create image accessor
+	imageAccessor := stargzget.NewImageAccessor(registryClient, registry, repository, manifest)
 
 	dgst, err := digest.Parse(blobDigest)
 	if err != nil {
@@ -112,9 +120,24 @@ func runLs(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	files, err := blobAccessor.ListFiles(context.Background(), dgst)
+	// Get image index
+	index, err := imageAccessor.ImageIndex(context.Background())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error getting image index: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Find the layer with the specified blob digest
+	var files []string
+	for _, layer := range index.Layers {
+		if layer.BlobDigest == dgst {
+			files = layer.Files
+			break
+		}
+	}
+
+	if files == nil {
+		fmt.Fprintf(os.Stderr, "Blob not found: %s\n", blobDigest)
 		os.Exit(1)
 	}
 
@@ -140,9 +163,17 @@ func runGet(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Get manifest first
 	registryClient := stargzget.NewRegistryClient()
-	blobAccessor := stargzget.NewBlobAccessor(registryClient, registry, repository)
-	downloader := stargzget.NewDownloader(blobAccessor)
+	manifest, err := registryClient.GetManifest(context.Background(), imageRef)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting manifest: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create image accessor and downloader
+	imageAccessor := stargzget.NewImageAccessor(registryClient, registry, repository, manifest)
+	downloader := stargzget.NewDownloader(imageAccessor)
 
 	dgst, err := digest.Parse(blobDigest)
 	if err != nil {
@@ -159,19 +190,26 @@ func runGet(cmd *cobra.Command, args []string) {
 		if path == "*" {
 			dirPath = "."
 		}
-		runGetDir(blobAccessor, downloader, dgst, dirPath, outputPath)
+		runGetDir(imageAccessor, downloader, dgst, dirPath, outputPath)
 	} else {
-		runGetSingle(blobAccessor, downloader, dgst, path, outputPath)
+		runGetSingle(imageAccessor, downloader, dgst, path, outputPath)
 	}
 }
 
-func runGetSingle(blobAccessor stargzget.BlobAccessor, downloader stargzget.Downloader, dgst digest.Digest, filePath, outputPath string) {
+func runGetSingle(imageAccessor stargzget.ImageAccessor, downloader stargzget.Downloader, dgst digest.Digest, filePath, outputPath string) {
 	ctx := context.Background()
 
-	// Get file metadata first to know the size
-	metadata, err := blobAccessor.GetFileMetadata(ctx, dgst, filePath)
+	// Get image index to find file metadata
+	index, err := imageAccessor.ImageIndex(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting file metadata: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error getting image index: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Find file to get its size
+	fileInfo, err := index.FindFile(filePath, dgst)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding file: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -182,7 +220,7 @@ func runGetSingle(blobAccessor stargzget.BlobAccessor, downloader stargzget.Down
 	if showProgress {
 		// Create progress bar
 		bar := progressbar.DefaultBytes(
-			metadata.Size,
+			fileInfo.Size,
 			fmt.Sprintf("Downloading %s", filePath),
 		)
 		progressCallback = func(current, total int64) {
@@ -190,7 +228,7 @@ func runGetSingle(blobAccessor stargzget.BlobAccessor, downloader stargzget.Down
 		}
 	} else {
 		// Simple log
-		fmt.Printf("Downloading %s (%d bytes)...\n", filePath, metadata.Size)
+		fmt.Printf("Downloading %s (%d bytes)...\n", filePath, fileInfo.Size)
 	}
 
 	// Download with progress callback
@@ -206,13 +244,13 @@ func runGetSingle(blobAccessor stargzget.BlobAccessor, downloader stargzget.Down
 	}
 
 	if showProgress {
-		fmt.Printf("\nSuccessfully downloaded %s (%d bytes)\n", filePath, metadata.Size)
+		fmt.Printf("\nSuccessfully downloaded %s (%d bytes)\n", filePath, fileInfo.Size)
 	} else {
-		fmt.Printf("Successfully downloaded %s (%d bytes)\n", filePath, metadata.Size)
+		fmt.Printf("Successfully downloaded %s (%d bytes)\n", filePath, fileInfo.Size)
 	}
 }
 
-func runGetDir(blobAccessor stargzget.BlobAccessor, downloader stargzget.Downloader, dgst digest.Digest, dirPath, outputDir string) {
+func runGetDir(imageAccessor stargzget.ImageAccessor, downloader stargzget.Downloader, dgst digest.Digest, dirPath, outputDir string) {
 	ctx := context.Background()
 
 	// Progress bar is enabled by default

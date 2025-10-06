@@ -32,20 +32,26 @@ type Downloader interface {
 }
 
 type downloader struct {
-	blobAccessor BlobAccessor
+	imageAccessor ImageAccessor
 }
 
-func NewDownloader(blobAccessor BlobAccessor) Downloader {
+func NewDownloader(imageAccessor ImageAccessor) Downloader {
 	return &downloader{
-		blobAccessor: blobAccessor,
+		imageAccessor: imageAccessor,
 	}
 }
 
 func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest, fileName string, targetPath string, progress ProgressCallback) error {
-	// Get file metadata to verify it exists
-	metadata, err := d.blobAccessor.GetFileMetadata(ctx, blobDigest, fileName)
+	// Get image index
+	index, err := d.imageAccessor.ImageIndex(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get file metadata: %w", err)
+		return fmt.Errorf("failed to get image index: %w", err)
+	}
+
+	// Find file to verify it exists and get its size
+	fileInfo, err := index.FindFile(fileName, blobDigest)
+	if err != nil {
+		return fmt.Errorf("failed to find file: %w", err)
 	}
 
 	// Create target directory if needed
@@ -61,8 +67,8 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 	}
 	defer outFile.Close()
 
-	// Open the file from the blob
-	fileReader, err := d.blobAccessor.OpenFile(ctx, blobDigest, fileName)
+	// Open the file from the image
+	fileReader, err := d.imageAccessor.OpenFile(ctx, fileName, fileInfo.BlobDigest)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
@@ -72,7 +78,7 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 	if progress != nil {
 		readerToUse = &progressReader{
 			reader:   fileReader,
-			total:    metadata.Size,
+			total:    fileInfo.Size,
 			callback: progress,
 		}
 	}
@@ -87,12 +93,26 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 }
 
 func (d *downloader) DownloadDir(ctx context.Context, blobDigest digest.Digest, dirPath string, outputDir string, progress ProgressCallback) (*DownloadStats, error) {
-	// List all files
-	allFiles, err := d.blobAccessor.ListFiles(ctx, blobDigest)
+	// Get image index
+	index, err := d.imageAccessor.ImageIndex(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list files: %w", err)
+		return nil, fmt.Errorf("failed to get image index: %w", err)
 	}
 
+	// Find the layer with the specified blob digest
+	var layerInfo *LayerInfo
+	for _, layer := range index.Layers {
+		if layer.BlobDigest == blobDigest {
+			layerInfo = layer
+			break
+		}
+	}
+
+	if layerInfo == nil {
+		return nil, fmt.Errorf("blob not found: %s", blobDigest)
+	}
+
+	allFiles := layerInfo.Files
 	if len(allFiles) == 0 {
 		return &DownloadStats{}, nil
 	}
@@ -134,22 +154,23 @@ func (d *downloader) DownloadDir(ctx context.Context, blobDigest digest.Digest, 
 	}
 
 	// Get metadata for all files and calculate total size
-	type fileInfo struct {
-		path     string
-		metadata *FileMetadata
+	type fileWithSize struct {
+		path string
+		size int64
 	}
 
-	var fileInfos []fileInfo
+	var fileInfos []fileWithSize
 	var totalSize int64
 
 	for _, file := range files {
-		metadata, err := d.blobAccessor.GetFileMetadata(ctx, blobDigest, file)
-		if err != nil {
-			// Skip files that fail metadata retrieval
+		// Get file size from layer info
+		size, ok := layerInfo.FileSizes[file]
+		if !ok {
+			// Skip files that don't have size info
 			continue
 		}
-		fileInfos = append(fileInfos, fileInfo{path: file, metadata: metadata})
-		totalSize += metadata.Size
+		fileInfos = append(fileInfos, fileWithSize{path: file, size: size})
+		totalSize += size
 	}
 
 	stats := &DownloadStats{
@@ -185,9 +206,9 @@ func (d *downloader) DownloadDir(ctx context.Context, blobDigest digest.Digest, 
 			continue
 		}
 
-		currentTotal += info.metadata.Size
+		currentTotal += info.size
 		stats.DownloadedFiles++
-		stats.DownloadedBytes += info.metadata.Size
+		stats.DownloadedBytes += info.size
 	}
 
 	return stats, nil

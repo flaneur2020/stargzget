@@ -21,32 +21,56 @@ type FileInfo struct {
 	Size       int64
 }
 
-// BlobIndex is an index of files across all blobs
-type BlobIndex struct {
+// LayerInfo contains information about a layer
+type LayerInfo struct {
+	BlobDigest digest.Digest
+	Files      []string
+	FileSizes  map[string]int64
+}
+
+// ImageIndex is an index of all files across all layers
+type ImageIndex struct {
+	Layers []*LayerInfo
 	// File index: path -> FileInfo
 	files map[string]*FileInfo
 }
 
-// GetFileInfo returns file info from the index
-func (idx *BlobIndex) GetFileInfo(path string) (*FileInfo, error) {
-	info, ok := idx.files[path]
-	if !ok {
-		return nil, fmt.Errorf("file not found in index: %s", path)
+// FindFile finds a file in the image index
+// If blobDigest is empty, it searches all layers for the file
+// If blobDigest is provided, it only searches within that specific blob
+func (idx *ImageIndex) FindFile(path string, blobDigest digest.Digest) (*FileInfo, error) {
+	if blobDigest.String() == "" {
+		// Search in all layers
+		info, ok := idx.files[path]
+		if !ok {
+			return nil, fmt.Errorf("file not found in index: %s", path)
+		}
+		return info, nil
 	}
-	return info, nil
+
+	// Search in specific blob
+	for _, layer := range idx.Layers {
+		if layer.BlobDigest == blobDigest {
+			if size, ok := layer.FileSizes[path]; ok {
+				return &FileInfo{
+					Path:       path,
+					BlobDigest: blobDigest,
+					Size:       size,
+				}, nil
+			}
+			return nil, fmt.Errorf("file %s not found in blob %s", path, blobDigest)
+		}
+	}
+	return nil, fmt.Errorf("blob not found: %s", blobDigest)
 }
 
-type BlobAccessor interface {
-	ListFiles(ctx context.Context, blobDigest digest.Digest) ([]string, error)
+type ImageAccessor interface {
+	// ImageIndex returns the index of all files in the image
+	ImageIndex(ctx context.Context) (*ImageIndex, error)
 
-	GetFileMetadata(ctx context.Context, blobDigest digest.Digest, fileName string) (*FileMetadata, error)
-
-	// OpenFile opens a file from a blob
-	// If blobDigest is empty, it will search the file index to find the appropriate blob
-	OpenFile(ctx context.Context, blobDigest digest.Digest, path string) (*io.SectionReader, error)
-
-	// BuildIndex scans all blobs and builds a file index
-	BuildIndex(ctx context.Context, blobDigests []digest.Digest) (*BlobIndex, error)
+	// OpenFile opens a file from the image
+	// blobDigest is required and specifies which blob to open the file from
+	OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error)
 }
 
 type FileMetadata struct {
@@ -60,32 +84,36 @@ type Chunk struct {
 	CompressedSize int64 // Size in the blob (compressed)
 }
 
-type blobAccessor struct {
+type imageAccessor struct {
 	httpClient     *http.Client
 	registryClient RegistryClient
 	registry       string
 	repository     string
+	manifest       *Manifest
 	// Cache: digest -> JTOC
 	tocCache map[string]*estargz.JTOC
 	// Auth token cache
 	authToken string
+	// Cached index
+	index *ImageIndex
 }
 
-func NewBlobAccessor(registryClient RegistryClient, registry, repository string) BlobAccessor {
-	return &blobAccessor{
+func NewImageAccessor(registryClient RegistryClient, registry, repository string, manifest *Manifest) ImageAccessor {
+	return &imageAccessor{
 		httpClient:     &http.Client{},
 		registryClient: registryClient,
 		registry:       registry,
 		repository:     repository,
+		manifest:       manifest,
 		tocCache:       make(map[string]*estargz.JTOC),
 	}
 }
 
 // getAuthToken gets auth token for blob access (similar to registry client)
-func (b *blobAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string) (string, error) {
+func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string) (string, error) {
 	// Reuse the same logic from RegistryClient
-	if b.authToken != "" {
-		return b.authToken, nil
+	if i.authToken != "" {
+		return i.authToken, nil
 	}
 
 	if !bytes.Contains([]byte(wwwAuthenticate), []byte("Bearer ")) {
@@ -121,7 +149,7 @@ func (b *blobAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string)
 		return "", fmt.Errorf("failed to create token request: %w", err)
 	}
 
-	resp, err := b.httpClient.Do(req)
+	resp, err := i.httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch token: %w", err)
 	}
@@ -145,27 +173,27 @@ func (b *blobAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string)
 		token = authResp.AccessToken
 	}
 
-	b.authToken = token
+	i.authToken = token
 	return token, nil
 }
 
 // downloadTOC downloads the stargz TOC using estargz library
-func (b *blobAccessor) downloadTOC(ctx context.Context, blobDigest string) (*estargz.JTOC, error) {
+func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*estargz.JTOC, error) {
 	// Check cache
-	if toc, ok := b.tocCache[blobDigest]; ok {
+	if toc, ok := i.tocCache[blobDigest]; ok {
 		return toc, nil
 	}
 
 	// Construct blob URL
-	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", b.registry, b.repository, blobDigest)
+	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", i.registry, i.repository, blobDigest)
 
 	// Create a readerat implementation that uses HTTP range requests
 	blobReader := &httpBlobReader{
-		client:       b.httpClient,
+		client:       i.httpClient,
 		url:          blobURL,
-		authToken:    &b.authToken,
+		authToken:    &i.authToken,
 		ctx:          ctx,
-		blobAccessor: b,
+		imageAccessor: i,
 	}
 
 	// Try to get the size first
@@ -220,7 +248,7 @@ func (b *blobAccessor) downloadTOC(ctx context.Context, blobDigest string) (*est
 			}
 
 			// Cache it
-			b.tocCache[blobDigest] = &toc
+			i.tocCache[blobDigest] = &toc
 
 			return &toc, nil
 		}
@@ -231,13 +259,13 @@ func (b *blobAccessor) downloadTOC(ctx context.Context, blobDigest string) (*est
 
 // httpBlobReader implements io.ReaderAt for HTTP range requests
 type httpBlobReader struct {
-	client       *http.Client
-	url          string
-	authToken    *string // pointer to share token with parent blobAccessor
-	ctx          context.Context
-	size         int64
-	sizeInit     bool
-	blobAccessor *blobAccessor
+	client        *http.Client
+	url           string
+	authToken     *string // pointer to share token with parent imageAccessor
+	ctx           context.Context
+	size          int64
+	sizeInit      bool
+	imageAccessor *imageAccessor
 }
 
 func (r *httpBlobReader) getSize() (int64, error) {
@@ -263,7 +291,7 @@ func (r *httpBlobReader) getSize() (int64, error) {
 	// Handle 401
 	if resp.StatusCode == http.StatusUnauthorized {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		token, err := r.blobAccessor.getAuthToken(r.ctx, wwwAuth)
+		token, err := r.imageAccessor.getAuthToken(r.ctx, wwwAuth)
 		if err != nil {
 			return -1, fmt.Errorf("auth failed: %w", err)
 		}
@@ -321,8 +349,9 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (n int, err error) {
 	return io.ReadFull(resp.Body, p)
 }
 
-func (b *blobAccessor) ListFiles(ctx context.Context, blobDigest digest.Digest) ([]string, error) {
-	toc, err := b.downloadTOC(ctx, blobDigest.String())
+// listFiles is a private helper method for internal use
+func (i *imageAccessor) listFiles(ctx context.Context, blobDigest digest.Digest) ([]string, error) {
+	toc, err := i.downloadTOC(ctx, blobDigest.String())
 	if err != nil {
 		return nil, err
 	}
@@ -337,8 +366,9 @@ func (b *blobAccessor) ListFiles(ctx context.Context, blobDigest digest.Digest) 
 	return files, nil
 }
 
-func (b *blobAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, fileName string) (*FileMetadata, error) {
-	toc, err := b.downloadTOC(ctx, blobDigest.String())
+// getFileMetadata is a private helper method for internal use
+func (i *imageAccessor) getFileMetadata(ctx context.Context, blobDigest digest.Digest, fileName string) (*FileMetadata, error) {
+	toc, err := i.downloadTOC(ctx, blobDigest.String())
 	if err != nil {
 		return nil, err
 	}
@@ -363,51 +393,83 @@ func (b *blobAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Di
 	return nil, fmt.Errorf("file not found: %s", fileName)
 }
 
-func (b *blobAccessor) BuildIndex(ctx context.Context, blobDigests []digest.Digest) (*BlobIndex, error) {
-	index := &BlobIndex{
-		files: make(map[string]*FileInfo),
+// ImageIndex returns the index of all files in the image
+func (i *imageAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
+	// Check cache
+	if i.index != nil {
+		return i.index, nil
 	}
 
-	for _, blobDigest := range blobDigests {
-		// Get TOC for this blob
-		toc, err := b.downloadTOC(ctx, blobDigest.String())
+	index := &ImageIndex{
+		Layers: make([]*LayerInfo, 0),
+		files:  make(map[string]*FileInfo),
+	}
+
+	// Iterate through all layers in the manifest
+	for _, layer := range i.manifest.Layers {
+		// Parse digest
+		dgst, err := digest.Parse(layer.Digest)
 		if err != nil {
-			// Skip blobs that fail to load TOC
+			// Skip invalid digests
 			continue
 		}
 
-		// Add files from this blob to the index
+		// Download TOC for this layer
+		toc, err := i.downloadTOC(ctx, layer.Digest)
+		if err != nil {
+			// Skip layers that fail to load TOC
+			continue
+		}
+
+		layerInfo := &LayerInfo{
+			BlobDigest: dgst,
+			Files:      make([]string, 0),
+			FileSizes:  make(map[string]int64),
+		}
+
+		// Add files from this layer
 		for _, entry := range toc.Entries {
 			if entry.Type == "reg" { // regular file
+				layerInfo.Files = append(layerInfo.Files, entry.Name)
+				layerInfo.FileSizes[entry.Name] = entry.Size
+
+				// Add to global file index (later layers override earlier ones)
 				index.files[entry.Name] = &FileInfo{
 					Path:       entry.Name,
-					BlobDigest: blobDigest,
+					BlobDigest: dgst,
 					Size:       entry.Size,
 				}
 			}
 		}
+
+		index.Layers = append(index.Layers, layerInfo)
 	}
+
+	// Cache the index
+	i.index = index
 
 	return index, nil
 }
 
-func (b *blobAccessor) OpenFile(ctx context.Context, blobDigest digest.Digest, path string) (*io.SectionReader, error) {
-	// Note: If blobDigest is empty, the caller should use BlobIndex to find the blob
+// buildIndex is deprecated and removed - use ImageIndex() instead
+
+func (i *imageAccessor) OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error) {
+	// Note: If blobDigest is empty, the caller should use ImageIndex to find the blob
 	// This method requires a valid blobDigest
 	if blobDigest.String() == "" {
 		return nil, fmt.Errorf("blobDigest is required for OpenFile")
 	}
 
 	// Construct blob URL
-	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", b.registry, b.repository, blobDigest.String())
+	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", i.registry, i.repository, blobDigest.String())
 
 	// Create a blob reader
 	blobReader := &httpBlobReader{
-		client:       b.httpClient,
-		url:          blobURL,
-		authToken:    &b.authToken,
-		ctx:          ctx,
-		blobAccessor: b,
+		client:        i.httpClient,
+		url:           blobURL,
+		authToken:     &i.authToken,
+		ctx:           ctx,
+		imageAccessor: i,
 	}
 
 	// Get blob size
@@ -430,7 +492,7 @@ func (b *blobAccessor) OpenFile(ctx context.Context, blobDigest digest.Digest, p
 	}
 
 	// Get file metadata to know the size
-	metadata, err := b.GetFileMetadata(ctx, blobDigest, path)
+	metadata, err := i.getFileMetadata(ctx, blobDigest, path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get file metadata: %w", err)
 	}
