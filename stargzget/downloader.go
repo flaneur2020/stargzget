@@ -10,8 +10,13 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
+// ProgressCallback is called during download to report progress
+// current: bytes downloaded so far
+// total: total file size (may be -1 if unknown)
+type ProgressCallback func(current int64, total int64)
+
 type Downloader interface {
-	DownloadFile(ctx context.Context, blobDigest digest.Digest, fileName string, targetPath string) error
+	DownloadFile(ctx context.Context, blobDigest digest.Digest, fileName string, targetPath string, progress ProgressCallback) error
 }
 
 type downloader struct {
@@ -24,9 +29,9 @@ func NewDownloader(blobAccessor BlobAccessor) Downloader {
 	}
 }
 
-func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest, fileName string, targetPath string) error {
+func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest, fileName string, targetPath string, progress ProgressCallback) error {
 	// Get file metadata to verify it exists
-	_, err := d.blobAccessor.GetFileMetadata(ctx, blobDigest, fileName)
+	metadata, err := d.blobAccessor.GetFileMetadata(ctx, blobDigest, fileName)
 	if err != nil {
 		return fmt.Errorf("failed to get file metadata: %w", err)
 	}
@@ -56,13 +61,42 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 		return fmt.Errorf("failed to open file in stargz: %w", err)
 	}
 
+	// Wrap fileReader with progress tracking if callback is provided
+	var readerToUse io.Reader = fileReader
+	if progress != nil {
+		readerToUse = &progressReader{
+			reader:   fileReader,
+			total:    metadata.Size,
+			callback: progress,
+		}
+	}
+
 	// Copy file content to target
-	bytesWritten, err := io.Copy(outFile, fileReader)
+	bytesWritten, err := io.Copy(outFile, readerToUse)
 	if err != nil {
 		return fmt.Errorf("failed to copy file content: %w", err)
 	}
 
-	fmt.Printf("Successfully downloaded %s (%d bytes)\n", fileName, bytesWritten)
+	if progress == nil {
+		fmt.Printf("Successfully downloaded %s (%d bytes)\n", fileName, bytesWritten)
+	}
 
 	return nil
+}
+
+// progressReader wraps an io.Reader to report download progress
+type progressReader struct {
+	reader   io.Reader
+	total    int64
+	current  int64
+	callback ProgressCallback
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.reader.Read(p)
+	pr.current += int64(n)
+	if pr.callback != nil {
+		pr.callback(pr.current, pr.total)
+	}
+	return n, err
 }

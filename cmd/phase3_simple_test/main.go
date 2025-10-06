@@ -44,7 +44,7 @@ func main() {
 	targetFile := "./output/bin/echo"
 	fmt.Printf("Downloading bin/echo to %s...\n", targetFile)
 
-	err = downloader.DownloadFile(context.Background(), blobDigest, "bin/echo", targetFile)
+	err = downloader.DownloadFile(context.Background(), blobDigest, "bin/echo", targetFile, nil)
 	if err != nil {
 		log.Fatalf("Failed to download file: %v", err)
 	}

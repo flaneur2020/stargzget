@@ -8,6 +8,7 @@ import (
 
 	"github.com/flaneur2020/stargz-get/stargzget"
 	"github.com/opencontainers/go-digest"
+	"github.com/schollz/progressbar/v3"
 )
 
 func main() {
@@ -167,15 +168,34 @@ func handleGet(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
+	// Get file metadata first to know the size
+	metadata, err := blobAccessor.GetFileMetadata(ctx, dgst, filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error getting file metadata: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Extract file name from path for output
 	outputPath := filePath
 	if len(args) > 3 {
 		outputPath = args[3]
 	}
 
-	err = downloader.DownloadFile(ctx, dgst, filePath, outputPath)
+	// Create progress bar
+	bar := progressbar.DefaultBytes(
+		metadata.Size,
+		fmt.Sprintf("Downloading %s", filePath),
+	)
+
+	// Download with progress callback
+	err = downloader.DownloadFile(ctx, dgst, filePath, outputPath, func(current, total int64) {
+		bar.Set64(current)
+	})
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		os.Exit(1)
 	}
+
+	fmt.Printf("\nSuccessfully downloaded %s (%d bytes)\n", filePath, metadata.Size)
 }
