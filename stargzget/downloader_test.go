@@ -123,7 +123,7 @@ func TestDownloader_StartDownload(t *testing.T) {
 				lastTotal = total
 			}
 
-			stats, err := downloader.StartDownload(context.Background(), tt.jobs, progressCallback)
+			stats, err := downloader.StartDownload(context.Background(), tt.jobs, progressCallback, nil)
 			if err != nil {
 				t.Errorf("StartDownload() error = %v", err)
 				return
@@ -188,5 +188,158 @@ func TestDownloadJob_Creation(t *testing.T) {
 
 	if job.OutputPath != "/tmp/echo" {
 		t.Errorf("Job output path = %s, want /tmp/echo", job.OutputPath)
+	}
+}
+
+// mockFailingAccessor simulates temporary failures
+type mockFailingAccessor struct {
+	files        map[string][]byte
+	failCount    map[string]int // path -> number of times to fail
+	attemptCount map[string]int // path -> current attempt count
+}
+
+func (m *mockFailingAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
+	return nil, nil
+}
+
+func (m *mockFailingAccessor) OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error) {
+	if m.attemptCount == nil {
+		m.attemptCount = make(map[string]int)
+	}
+
+	// Increment attempt count
+	m.attemptCount[path]++
+
+	// Check if we should fail
+	if failTimes, exists := m.failCount[path]; exists {
+		if m.attemptCount[path] <= failTimes {
+			// Simulate a failure
+			return nil, io.ErrUnexpectedEOF
+		}
+	}
+
+	// Success - return file content
+	content, ok := m.files[path]
+	if !ok {
+		return nil, io.EOF
+	}
+	return io.NewSectionReader(bytes.NewReader(content), 0, int64(len(content))), nil
+}
+
+func TestDownloader_StartDownload_WithRetries(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "downloader-retry-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	tests := []struct {
+		name          string
+		failCount     map[string]int // path -> number of times to fail before success
+		maxRetries    int
+		wantSuccess   int
+		wantFailed    int
+		wantRetries   int
+	}{
+		{
+			name: "succeed on first attempt",
+			failCount: map[string]int{
+				"file1": 0, // no failures
+			},
+			maxRetries:  3,
+			wantSuccess: 1,
+			wantFailed:  0,
+			wantRetries: 0,
+		},
+		{
+			name: "succeed after 1 retry",
+			failCount: map[string]int{
+				"file1": 1, // fail once, then succeed
+			},
+			maxRetries:  3,
+			wantSuccess: 1,
+			wantFailed:  0,
+			wantRetries: 1,
+		},
+		{
+			name: "succeed after 2 retries",
+			failCount: map[string]int{
+				"file1": 2, // fail twice, then succeed
+			},
+			maxRetries:  3,
+			wantSuccess: 1,
+			wantFailed:  0,
+			wantRetries: 2,
+		},
+		{
+			name: "fail after max retries",
+			failCount: map[string]int{
+				"file1": 10, // always fail
+			},
+			maxRetries:  3,
+			wantSuccess: 0,
+			wantFailed:  1,
+			wantRetries: 3,
+		},
+		{
+			name: "mixed success and failure",
+			failCount: map[string]int{
+				"file1": 0,  // succeed immediately
+				"file2": 1,  // succeed after 1 retry
+				"file3": 10, // fail after all retries
+			},
+			maxRetries:  2,
+			wantSuccess: 2,
+			wantFailed:  1,
+			wantRetries: 3, // 0 for file1, 1 for file2, 2 for file3
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockAccessor := &mockFailingAccessor{
+				files: map[string][]byte{
+					"file1": []byte("content1"),
+					"file2": []byte("content2"),
+					"file3": []byte("content3"),
+				},
+				failCount:    tt.failCount,
+				attemptCount: make(map[string]int),
+			}
+
+			downloader := NewDownloader(mockAccessor)
+
+			var jobs []*DownloadJob
+			for path := range tt.failCount {
+				jobs = append(jobs, &DownloadJob{
+					Path:       path,
+					BlobDigest: digest.FromString("test"),
+					Size:       int64(len(mockAccessor.files[path])),
+					OutputPath: filepath.Join(tempDir, tt.name, path),
+				})
+			}
+
+			opts := &DownloadOptions{
+				MaxRetries: tt.maxRetries,
+			}
+
+			stats, err := downloader.StartDownload(context.Background(), jobs, nil, opts)
+			if err != nil {
+				t.Errorf("StartDownload() unexpected error: %v", err)
+				return
+			}
+
+			if stats.DownloadedFiles != tt.wantSuccess {
+				t.Errorf("DownloadedFiles = %d, want %d", stats.DownloadedFiles, tt.wantSuccess)
+			}
+
+			if stats.FailedFiles != tt.wantFailed {
+				t.Errorf("FailedFiles = %d, want %d", stats.FailedFiles, tt.wantFailed)
+			}
+
+			if stats.Retries != tt.wantRetries {
+				t.Errorf("Retries = %d, want %d", stats.Retries, tt.wantRetries)
+			}
+		})
 	}
 }

@@ -250,8 +250,8 @@ func runGet(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Start download
-	stats, err := downloader.StartDownload(ctx, jobs, progressCallback)
+	// Start download with default options (3 retries)
+	stats, err := downloader.StartDownload(ctx, jobs, progressCallback, nil)
 	if err != nil {
 		if showProgress {
 			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
@@ -263,10 +263,24 @@ func runGet(cmd *cobra.Command, args []string) {
 
 	// Print results
 	if showProgress && bar != nil {
-		fmt.Printf("\nSuccessfully downloaded %d/%d files (%d bytes total)\n",
+		fmt.Printf("\nSuccessfully downloaded %d/%d files (%d bytes total)",
 			stats.DownloadedFiles, stats.TotalFiles, stats.DownloadedBytes)
+		if stats.FailedFiles > 0 {
+			fmt.Printf(" (%d failed)", stats.FailedFiles)
+		}
+		if stats.Retries > 0 {
+			fmt.Printf(" (%d retries)", stats.Retries)
+		}
+		fmt.Println()
 	} else {
-		fmt.Printf("Successfully downloaded %d/%d files (%d bytes total)\n",
+		fmt.Printf("Successfully downloaded %d/%d files (%d bytes total)",
 			stats.DownloadedFiles, stats.TotalFiles, stats.DownloadedBytes)
+		if stats.FailedFiles > 0 {
+			fmt.Printf(" (%d failed)", stats.FailedFiles)
+		}
+		if stats.Retries > 0 {
+			fmt.Printf(" (%d retries)", stats.Retries)
+		}
+		fmt.Println()
 	}
 }
