@@ -265,10 +265,10 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 
 	// Create a readerat implementation that uses HTTP range requests
 	blobReader := &httpBlobReader{
-		client:       i.httpClient,
-		url:          blobURL,
-		authToken:    &i.authToken,
-		ctx:          ctx,
+		client:        i.httpClient,
+		url:           blobURL,
+		authToken:     &i.authToken,
+		ctx:           ctx,
 		imageAccessor: i,
 	}
 
