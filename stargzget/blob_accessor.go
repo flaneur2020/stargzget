@@ -14,13 +14,39 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
+// FileInfo contains information about a file in the image
+type FileInfo struct {
+	Path       string
+	BlobDigest digest.Digest
+	Size       int64
+}
+
+// BlobIndex is an index of files across all blobs
+type BlobIndex struct {
+	// File index: path -> FileInfo
+	files map[string]*FileInfo
+}
+
+// GetFileInfo returns file info from the index
+func (idx *BlobIndex) GetFileInfo(path string) (*FileInfo, error) {
+	info, ok := idx.files[path]
+	if !ok {
+		return nil, fmt.Errorf("file not found in index: %s", path)
+	}
+	return info, nil
+}
+
 type BlobAccessor interface {
 	ListFiles(ctx context.Context, blobDigest digest.Digest) ([]string, error)
 
 	GetFileMetadata(ctx context.Context, blobDigest digest.Digest, fileName string) (*FileMetadata, error)
 
-	// OpenReader opens the stargz blob as a reader
-	OpenReader(ctx context.Context, blobDigest digest.Digest) (*estargz.Reader, error)
+	// OpenFile opens a file from a blob
+	// If blobDigest is empty, it will search the file index to find the appropriate blob
+	OpenFile(ctx context.Context, blobDigest digest.Digest, path string) (*io.SectionReader, error)
+
+	// BuildIndex scans all blobs and builds a file index
+	BuildIndex(ctx context.Context, blobDigests []digest.Digest) (*BlobIndex, error)
 }
 
 type FileMetadata struct {
@@ -337,7 +363,41 @@ func (b *blobAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Di
 	return nil, fmt.Errorf("file not found: %s", fileName)
 }
 
-func (b *blobAccessor) OpenReader(ctx context.Context, blobDigest digest.Digest) (*estargz.Reader, error) {
+func (b *blobAccessor) BuildIndex(ctx context.Context, blobDigests []digest.Digest) (*BlobIndex, error) {
+	index := &BlobIndex{
+		files: make(map[string]*FileInfo),
+	}
+
+	for _, blobDigest := range blobDigests {
+		// Get TOC for this blob
+		toc, err := b.downloadTOC(ctx, blobDigest.String())
+		if err != nil {
+			// Skip blobs that fail to load TOC
+			continue
+		}
+
+		// Add files from this blob to the index
+		for _, entry := range toc.Entries {
+			if entry.Type == "reg" { // regular file
+				index.files[entry.Name] = &FileInfo{
+					Path:       entry.Name,
+					BlobDigest: blobDigest,
+					Size:       entry.Size,
+				}
+			}
+		}
+	}
+
+	return index, nil
+}
+
+func (b *blobAccessor) OpenFile(ctx context.Context, blobDigest digest.Digest, path string) (*io.SectionReader, error) {
+	// Note: If blobDigest is empty, the caller should use BlobIndex to find the blob
+	// This method requires a valid blobDigest
+	if blobDigest.String() == "" {
+		return nil, fmt.Errorf("blobDigest is required for OpenFile")
+	}
+
 	// Construct blob URL
 	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", b.registry, b.repository, blobDigest.String())
 
@@ -363,5 +423,25 @@ func (b *blobAccessor) OpenReader(ctx context.Context, blobDigest digest.Digest)
 		return nil, fmt.Errorf("failed to open stargz: %w", err)
 	}
 
-	return reader, nil
+	// Open the specific file
+	fileReader, err := reader.OpenFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
+	}
+
+	// Get file metadata to know the size
+	metadata, err := b.GetFileMetadata(ctx, blobDigest, path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file metadata: %w", err)
+	}
+
+	// Return a SectionReader that reads from the file
+	// We need to wrap the fileReader in a way that allows ReadAt
+	// Since fileReader is just an io.Reader, we need to read all content first
+	content, err := io.ReadAll(fileReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file content: %w", err)
+	}
+
+	return io.NewSectionReader(bytes.NewReader(content), 0, metadata.Size), nil
 }

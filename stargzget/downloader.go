@@ -61,16 +61,10 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 	}
 	defer outFile.Close()
 
-	// Open the stargz reader
-	reader, err := d.blobAccessor.OpenReader(ctx, blobDigest)
+	// Open the file from the blob
+	fileReader, err := d.blobAccessor.OpenFile(ctx, blobDigest, fileName)
 	if err != nil {
-		return fmt.Errorf("failed to open stargz reader: %w", err)
-	}
-
-	// Open the file from the stargz archive
-	fileReader, err := reader.OpenFile(fileName)
-	if err != nil {
-		return fmt.Errorf("failed to open file in stargz: %w", err)
+		return fmt.Errorf("failed to open file: %w", err)
 	}
 
 	// Wrap fileReader with progress tracking if callback is provided
