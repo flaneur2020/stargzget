@@ -26,7 +26,7 @@ stargz-get is designed to be a simple and lightweight tool. It is not designed t
 in the codebase, it contains these components:
 
 - `RegistryClient`: to list the manifest of the image layers.
-- `BlobManager`: to read the manifest data from stargz index, it downloads the stargz manifest index only, manages the access of the files list, chunk list, etc.
+- `BlobAccessor`: to read the manifest data from stargz index, it downloads the stargz manifest index only, manages the access of the files list, chunk list, etc.
 - `ChunkDownloader`: manages the download of the chunks, it uses `http.Client` to download the chunks, and uncompress the chunks on the fly, and directly write the uncompressed chunks to the target path of the local directory.
 
 ## Roadmap
