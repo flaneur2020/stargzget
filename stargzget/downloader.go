@@ -72,13 +72,9 @@ func (d *downloader) DownloadFile(ctx context.Context, blobDigest digest.Digest,
 	}
 
 	// Copy file content to target
-	bytesWritten, err := io.Copy(outFile, readerToUse)
+	_, err = io.Copy(outFile, readerToUse)
 	if err != nil {
 		return fmt.Errorf("failed to copy file content: %w", err)
-	}
-
-	if progress == nil {
-		fmt.Printf("Successfully downloaded %s (%d bytes)\n", fileName, bytesWritten)
 	}
 
 	return nil

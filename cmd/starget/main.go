@@ -9,48 +9,52 @@ import (
 	"github.com/flaneur2020/stargz-get/stargzget"
 	"github.com/opencontainers/go-digest"
 	"github.com/schollz/progressbar/v3"
+	"github.com/spf13/cobra"
+)
+
+var (
+	credential string
+	noProgress bool
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
+	rootCmd := &cobra.Command{
+		Use:   "starget",
+		Short: "A CLI tool for working with stargz container images",
+	}
+
+	rootCmd.PersistentFlags().StringVar(&credential, "credential", "", "Registry credential in format USER:PASSWORD")
+
+	// layers command
+	layersCmd := &cobra.Command{
+		Use:   "layers <REGISTRY>/<IMAGE>:<TAG>",
+		Short: "List all layers in an image",
+		Args:  cobra.ExactArgs(1),
+		Run:   runLayers,
+	}
+
+	// ls command
+	lsCmd := &cobra.Command{
+		Use:   "ls <REGISTRY>/<IMAGE>:<TAG> <BLOB>",
+		Short: "List files in a blob",
+		Args:  cobra.ExactArgs(2),
+		Run:   runLs,
+	}
+
+	// get command
+	getCmd := &cobra.Command{
+		Use:   "get <REGISTRY>/<IMAGE>:<TAG> <BLOB> <FILE_PATH> [OUTPUT_PATH]",
+		Short: "Download a file from a blob",
+		Args:  cobra.RangeArgs(3, 4),
+		Run:   runGet,
+	}
+	getCmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress bar (progress is enabled by default)")
+
+	rootCmd.AddCommand(layersCmd, lsCmd, getCmd)
+
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
-
-	subcommand := os.Args[1]
-	ctx := context.Background()
-
-	switch subcommand {
-	case "layers":
-		handleLayers(ctx, os.Args[2:])
-	case "ls":
-		handleLs(ctx, os.Args[2:])
-	case "get":
-		handleGet(ctx, os.Args[2:])
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", subcommand)
-		printUsage()
-		os.Exit(1)
-	}
-}
-
-func printUsage() {
-	fmt.Println("Usage:")
-	fmt.Println("  starget layers <REGISTRY>/<IMAGE>:<TAG> [--credential=<USER:PASSWORD>]")
-	fmt.Println("  starget ls <REGISTRY>/<IMAGE>:<TAG> <BLOB> [--credential=<USER:PASSWORD>]")
-	fmt.Println("  starget get <REGISTRY>/<IMAGE>:<TAG> <BLOB> <PATH> [--credential=<USER:PASSWORD>]")
-}
-
-func parseCredential(args []string) (string, []string) {
-	for i, arg := range args {
-		if strings.HasPrefix(arg, "--credential=") {
-			cred := strings.TrimPrefix(arg, "--credential=")
-			// Remove this arg from the slice
-			newArgs := append(args[:i], args[i+1:]...)
-			return cred, newArgs
-		}
-	}
-	return "", args
 }
 
 func parseImageRef(imageRef string) (string, string, error) {
@@ -72,20 +76,11 @@ func parseImageRef(imageRef string) (string, string, error) {
 	return registry, repository, nil
 }
 
-func handleLayers(ctx context.Context, args []string) {
-	cred, args := parseCredential(args)
-	_ = cred // TODO: use credential for authentication
-
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Error: missing image reference")
-		printUsage()
-		os.Exit(1)
-	}
-
+func runLayers(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 
 	client := stargzget.NewRegistryClient()
-	manifest, err := client.GetManifest(ctx, imageRef)
+	manifest, err := client.GetManifest(context.Background(), imageRef)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -98,16 +93,7 @@ func handleLayers(ctx context.Context, args []string) {
 	}
 }
 
-func handleLs(ctx context.Context, args []string) {
-	cred, args := parseCredential(args)
-	_ = cred // TODO: use credential for authentication
-
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "Error: missing image reference or blob digest")
-		printUsage()
-		os.Exit(1)
-	}
-
+func runLs(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 	blobDigest := args[1]
 
@@ -126,7 +112,7 @@ func handleLs(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	files, err := blobAccessor.ListFiles(ctx, dgst)
+	files, err := blobAccessor.ListFiles(context.Background(), dgst)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -138,19 +124,15 @@ func handleLs(ctx context.Context, args []string) {
 	}
 }
 
-func handleGet(ctx context.Context, args []string) {
-	cred, args := parseCredential(args)
-	_ = cred // TODO: use credential for authentication
-
-	if len(args) < 3 {
-		fmt.Fprintln(os.Stderr, "Error: missing arguments")
-		printUsage()
-		os.Exit(1)
-	}
-
+func runGet(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 	blobDigest := args[1]
 	filePath := args[2]
+
+	outputPath := filePath
+	if len(args) > 3 {
+		outputPath = args[3]
+	}
 
 	registry, repository, err := parseImageRef(imageRef)
 	if err != nil {
@@ -169,33 +151,45 @@ func handleGet(ctx context.Context, args []string) {
 	}
 
 	// Get file metadata first to know the size
-	metadata, err := blobAccessor.GetFileMetadata(ctx, dgst, filePath)
+	metadata, err := blobAccessor.GetFileMetadata(context.Background(), dgst, filePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting file metadata: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Extract file name from path for output
-	outputPath := filePath
-	if len(args) > 3 {
-		outputPath = args[3]
+	// Progress bar is enabled by default
+	showProgress := !noProgress
+
+	var progressCallback stargzget.ProgressCallback
+	if showProgress {
+		// Create progress bar
+		bar := progressbar.DefaultBytes(
+			metadata.Size,
+			fmt.Sprintf("Downloading %s", filePath),
+		)
+		progressCallback = func(current, total int64) {
+			bar.Set64(current)
+		}
+	} else {
+		// Simple log
+		fmt.Printf("Downloading %s (%d bytes)...\n", filePath, metadata.Size)
 	}
 
-	// Create progress bar
-	bar := progressbar.DefaultBytes(
-		metadata.Size,
-		fmt.Sprintf("Downloading %s", filePath),
-	)
-
 	// Download with progress callback
-	err = downloader.DownloadFile(ctx, dgst, filePath, outputPath, func(current, total int64) {
-		bar.Set64(current)
-	})
+	err = downloader.DownloadFile(context.Background(), dgst, filePath, outputPath, progressCallback)
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+		if showProgress {
+			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 
-	fmt.Printf("\nSuccessfully downloaded %s (%d bytes)\n", filePath, metadata.Size)
+	if showProgress {
+		fmt.Printf("\nSuccessfully downloaded %s (%d bytes)\n", filePath, metadata.Size)
+	} else {
+		fmt.Printf("Successfully downloaded %s (%d bytes)\n", filePath, metadata.Size)
+	}
 }
