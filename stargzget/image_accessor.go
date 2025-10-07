@@ -80,6 +80,7 @@ func (idx *ImageIndex) FindFile(path string, blobDigest digest.Digest) (*FileInf
 // - A directory path (e.g., "bin/" or "bin") - returns all files under that directory
 // - "." or "/" or "" - returns all files
 // If blobDigest is provided (not empty), only returns files from that blob
+// If blobDigest is empty, returns files from all layers (later layers override earlier ones)
 func (idx *ImageIndex) FilterFiles(pathPattern string, blobDigest digest.Digest) []*FileInfo {
 	var results []*FileInfo
 
@@ -88,24 +89,9 @@ func (idx *ImageIndex) FilterFiles(pathPattern string, blobDigest digest.Digest)
 		pathPattern = "" // Match all files
 	}
 
-	// Determine which layers to search
-	var layersToSearch []*LayerInfo
+	// If no blob digest specified, search in the global file index (later layers override earlier ones)
 	if blobDigest.String() == "" {
-		// Search all layers
-		layersToSearch = idx.Layers
-	} else {
-		// Search only the specified blob
-		for _, layer := range idx.Layers {
-			if layer.BlobDigest == blobDigest {
-				layersToSearch = []*LayerInfo{layer}
-				break
-			}
-		}
-	}
-
-	// Collect files from selected layers
-	for _, layer := range layersToSearch {
-		for _, filePath := range layer.Files {
+		for filePath, fileInfo := range idx.files {
 			matched := false
 
 			if pathPattern == "" {
@@ -136,13 +122,55 @@ func (idx *ImageIndex) FilterFiles(pathPattern string, blobDigest digest.Digest)
 			}
 
 			if matched {
-				size := layer.FileSizes[filePath]
-				results = append(results, &FileInfo{
-					Path:       filePath,
-					BlobDigest: layer.BlobDigest,
-					Size:       size,
-				})
+				results = append(results, fileInfo)
 			}
+		}
+		return results
+	}
+
+	// Blob digest is specified - search only in that specific layer
+	for _, layer := range idx.Layers {
+		if layer.BlobDigest == blobDigest {
+			for _, filePath := range layer.Files {
+				matched := false
+
+				if pathPattern == "" {
+					// Match all files
+					matched = true
+				} else {
+					// Normalize file path for comparison
+					normalizedFile := filePath
+					if !strings.HasPrefix(normalizedFile, "/") {
+						normalizedFile = "/" + normalizedFile
+					}
+
+					normalizedPattern := pathPattern
+					if !strings.HasPrefix(normalizedPattern, "/") {
+						normalizedPattern = "/" + normalizedPattern
+					}
+
+					// Check if it's a directory pattern (ends with /)
+					if strings.HasSuffix(pathPattern, "/") {
+						// Directory match - check if file is under this directory
+						matched = strings.HasPrefix(normalizedFile, normalizedPattern)
+					} else {
+						// Could be either a file or directory
+						// Match exact file or files under directory
+						matched = normalizedFile == normalizedPattern ||
+							strings.HasPrefix(normalizedFile, normalizedPattern+"/")
+					}
+				}
+
+				if matched {
+					size := layer.FileSizes[filePath]
+					results = append(results, &FileInfo{
+						Path:       filePath,
+						BlobDigest: layer.BlobDigest,
+						Size:       size,
+					})
+				}
+			}
+			break
 		}
 	}
 
