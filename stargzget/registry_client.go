@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/flaneur2020/stargz-get/logger"
 )
 
 type RegistryClient interface {
@@ -170,6 +172,8 @@ func (c *registryClient) getAuthToken(ctx context.Context, registry, repository,
 }
 
 func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Manifest, error) {
+	logger.Info("Fetching manifest for image: %s", imageRef)
+
 	registry, repository, tag, err := parseImageRef(imageRef)
 	if err != nil {
 		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
@@ -178,6 +182,8 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 	// Construct OCI registry API URL
 	scheme := getScheme(registry)
 	url := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, registry, repository, tag)
+
+	logger.Debug("Manifest URL: %s", url)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -196,24 +202,34 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 		req.SetBasicAuth(c.username, c.password)
 	}
 
+	Debug("Sending HTTP request: GET %s", url)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		Error("HTTP request failed: %v", err)
 		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 	}
 	defer resp.Body.Close()
 
+	Debug("Received HTTP response: %d %s", resp.StatusCode, resp.Status)
+
 	var token string
 	// Handle 401 with token auth
 	if resp.StatusCode == http.StatusUnauthorized {
+		Info("Authentication required, fetching token...")
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
 		if wwwAuth == "" {
 			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("got 401 but no WWW-Authenticate header"))
 		}
 
+		Debug("WWW-Authenticate: %s", wwwAuth)
+
 		token, err = c.getAuthToken(ctx, registry, repository, wwwAuth)
 		if err != nil {
+			Error("Failed to get auth token: %v", err)
 			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
+
+		Info("Successfully obtained auth token")
 
 		// Retry with token
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)

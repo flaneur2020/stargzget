@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/flaneur2020/stargz-get/logger"
 	"github.com/flaneur2020/stargz-get/stargzget"
 	"github.com/opencontainers/go-digest"
 	"github.com/schollz/progressbar/v3"
@@ -17,15 +18,29 @@ var (
 	credential  string
 	noProgress  bool
 	concurrency int
+	verbose     bool
+	debug       bool
 )
 
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "starget",
 		Short: "A CLI tool for working with stargz container images",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Set log level based on flags
+			if debug {
+				logger.SetLogLevel(logger.LogLevelDebug)
+			} else if verbose {
+				logger.SetLogLevel(logger.LogLevelInfo)
+			} else {
+				logger.SetLogLevel(logger.LogLevelError)
+			}
+		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&credential, "credential", "", "Registry credential in format USER:PASSWORD")
+	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable verbose logging (INFO level)")
+	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Enable debug logging (DEBUG level)")
 
 	// info command
 	infoCmd := &cobra.Command{
