@@ -53,6 +53,13 @@ starget get ghcr.io/stargz-containers/node:13.13.0-esgz \
   . output/
 ```
 
+Use with private registries (requires authentication):
+```bash
+starget --credential user:password info registry.example.com/private/image:latest
+starget --credential user:password get registry.example.com/private/image:latest \
+  sha256:abc123... bin/echo output/
+```
+
 ## Commands
 
 ### `starget info`

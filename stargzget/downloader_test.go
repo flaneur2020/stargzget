@@ -29,6 +29,11 @@ func (m *mockImageAccessor) OpenFile(ctx context.Context, path string, blobDiges
 	return io.NewSectionReader(bytes.NewReader(content), 0, int64(len(content))), nil
 }
 
+func (m *mockImageAccessor) WithCredential(username, password string) ImageAccessor {
+	// Return self for testing
+	return m
+}
+
 func TestDownloader_StartDownload(t *testing.T) {
 	// Create temp directory for test outputs
 	tempDir, err := os.MkdirTemp("", "downloader-test-*")
@@ -224,6 +229,11 @@ func (m *mockFailingAccessor) OpenFile(ctx context.Context, path string, blobDig
 		return nil, io.EOF
 	}
 	return io.NewSectionReader(bytes.NewReader(content), 0, int64(len(content))), nil
+}
+
+func (m *mockFailingAccessor) WithCredential(username, password string) ImageAccessor {
+	// Return self for testing
+	return m
 }
 
 func TestDownloader_StartDownload_WithRetries(t *testing.T) {

@@ -77,10 +77,29 @@ func parseImageRef(imageRef string) (string, string, error) {
 	return registry, repository, nil
 }
 
+func parseCredential(cred string) (string, string, error) {
+	parts := strings.SplitN(cred, ":", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid credential format, expected USER:PASSWORD")
+	}
+	return parts[0], parts[1], nil
+}
+
 func runInfo(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 
 	client := stargzget.NewRegistryClient()
+
+	// Apply credentials if provided
+	if credential != "" {
+		username, password, err := parseCredential(credential)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing credential: %v\n", err)
+			os.Exit(1)
+		}
+		client = client.WithCredential(username, password)
+	}
+
 	manifest, err := client.GetManifest(context.Background(), imageRef)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -106,6 +125,17 @@ func runLs(cmd *cobra.Command, args []string) {
 
 	// Get manifest first
 	registryClient := stargzget.NewRegistryClient()
+
+	// Apply credentials if provided
+	if credential != "" {
+		username, password, err := parseCredential(credential)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing credential: %v\n", err)
+			os.Exit(1)
+		}
+		registryClient = registryClient.WithCredential(username, password)
+	}
+
 	manifest, err := registryClient.GetManifest(context.Background(), imageRef)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting manifest: %v\n", err)
@@ -114,6 +144,12 @@ func runLs(cmd *cobra.Command, args []string) {
 
 	// Create image accessor
 	imageAccessor := stargzget.NewImageAccessor(registryClient, registry, repository, manifest)
+
+	// Apply credentials to image accessor if provided
+	if credential != "" {
+		username, password, _ := parseCredential(credential)
+		imageAccessor = imageAccessor.WithCredential(username, password)
+	}
 
 	dgst, err := digest.Parse(blobDigest)
 	if err != nil {
@@ -168,6 +204,17 @@ func runGet(cmd *cobra.Command, args []string) {
 
 	// Get manifest first
 	registryClient := stargzget.NewRegistryClient()
+
+	// Apply credentials if provided
+	if credential != "" {
+		username, password, err := parseCredential(credential)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing credential: %v\n", err)
+			os.Exit(1)
+		}
+		registryClient = registryClient.WithCredential(username, password)
+	}
+
 	manifest, err := registryClient.GetManifest(ctx, imageRef)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting manifest: %v\n", err)
@@ -176,6 +223,13 @@ func runGet(cmd *cobra.Command, args []string) {
 
 	// Create image accessor and downloader
 	imageAccessor := stargzget.NewImageAccessor(registryClient, registry, repository, manifest)
+
+	// Apply credentials to image accessor if provided
+	if credential != "" {
+		username, password, _ := parseCredential(credential)
+		imageAccessor = imageAccessor.WithCredential(username, password)
+	}
+
 	downloader := stargzget.NewDownloader(imageAccessor)
 
 	// Parse blob digest

@@ -11,6 +11,7 @@ import (
 
 type RegistryClient interface {
 	GetManifest(ctx context.Context, imageRef string) (*Manifest, error)
+	WithCredential(username, password string) RegistryClient
 }
 
 type Manifest struct {
@@ -43,11 +44,22 @@ func (l *Layer) IsStargz() bool {
 
 type registryClient struct {
 	httpClient *http.Client
+	username   string
+	password   string
 }
 
 func NewRegistryClient() RegistryClient {
 	return &registryClient{
 		httpClient: &http.Client{},
+	}
+}
+
+// WithCredential returns a new RegistryClient with the provided credentials
+func (c *registryClient) WithCredential(username, password string) RegistryClient {
+	return &registryClient{
+		httpClient: c.httpClient,
+		username:   username,
+		password:   password,
 	}
 }
 
@@ -162,6 +174,11 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 	// Accept OCI index for multi-platform images
 	req.Header.Add("Accept", "application/vnd.oci.image.index.v1+json")
 
+	// Add Basic Auth if credentials are provided
+	if c.username != "" && c.password != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
@@ -190,6 +207,11 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 		req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
 		req.Header.Add("Accept", "application/vnd.oci.image.index.v1+json")
 		req.Header.Set("Authorization", "Bearer "+token)
+
+		// Add Basic Auth if credentials are provided (some registries may need both)
+		if c.username != "" && c.password != "" {
+			req.SetBasicAuth(c.username, c.password)
+		}
 
 		resp, err = c.httpClient.Do(req)
 		if err != nil {
@@ -226,6 +248,11 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 		// Use token if we have one
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		// Add Basic Auth if credentials are provided
+		if c.username != "" && c.password != "" {
+			req.SetBasicAuth(c.username, c.password)
 		}
 
 		resp2, err := c.httpClient.Do(req)

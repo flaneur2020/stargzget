@@ -147,6 +147,9 @@ type ImageAccessor interface {
 	// OpenFile opens a file from the image
 	// blobDigest is required and specifies which blob to open the file from
 	OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error)
+
+	// WithCredential returns a new ImageAccessor with the provided credentials
+	WithCredential(username, password string) ImageAccessor
 }
 
 type FileMetadata struct {
@@ -172,6 +175,9 @@ type imageAccessor struct {
 	authToken string
 	// Cached index
 	index *ImageIndex
+	// Basic auth credentials
+	username string
+	password string
 }
 
 func NewImageAccessor(registryClient RegistryClient, registry, repository string, manifest *Manifest) ImageAccessor {
@@ -182,6 +188,22 @@ func NewImageAccessor(registryClient RegistryClient, registry, repository string
 		repository:     repository,
 		manifest:       manifest,
 		tocCache:       make(map[string]*estargz.JTOC),
+	}
+}
+
+// WithCredential returns a new ImageAccessor with the provided credentials
+func (i *imageAccessor) WithCredential(username, password string) ImageAccessor {
+	return &imageAccessor{
+		httpClient:     i.httpClient,
+		registryClient: i.registryClient,
+		registry:       i.registry,
+		repository:     i.repository,
+		manifest:       i.manifest,
+		tocCache:       i.tocCache,
+		authToken:      i.authToken,
+		index:          i.index,
+		username:       username,
+		password:       password,
 	}
 }
 
@@ -358,6 +380,11 @@ func (r *httpBlobReader) getSize() (int64, error) {
 		req.Header.Set("Authorization", "Bearer "+*r.authToken)
 	}
 
+	// Add Basic Auth if credentials are provided
+	if r.imageAccessor.username != "" && r.imageAccessor.password != "" {
+		req.SetBasicAuth(r.imageAccessor.username, r.imageAccessor.password)
+	}
+
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return -1, err
@@ -378,6 +405,11 @@ func (r *httpBlobReader) getSize() (int64, error) {
 			return -1, err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
+
+		// Add Basic Auth if credentials are provided
+		if r.imageAccessor.username != "" && r.imageAccessor.password != "" {
+			req.SetBasicAuth(r.imageAccessor.username, r.imageAccessor.password)
+		}
 
 		resp, err = r.client.Do(req)
 		if err != nil {
@@ -410,6 +442,11 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (n int, err error) {
 
 	if *r.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+*r.authToken)
+	}
+
+	// Add Basic Auth if credentials are provided
+	if r.imageAccessor.username != "" && r.imageAccessor.password != "" {
+		req.SetBasicAuth(r.imageAccessor.username, r.imageAccessor.password)
 	}
 
 	resp, err := r.client.Do(req)
