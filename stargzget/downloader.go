@@ -36,8 +36,8 @@ type DownloadStats struct {
 	TotalBytes      int64
 	DownloadedFiles int
 	DownloadedBytes int64
-	FailedFiles     int   // Number of files that failed after all retries
-	Retries         int   // Total number of retries performed
+	FailedFiles     int // Number of files that failed after all retries
+	Retries         int // Total number of retries performed
 }
 
 // DownloadOptions configures download behavior
@@ -45,6 +45,13 @@ type DownloadOptions struct {
 	MaxRetries  int            // Maximum number of retries per file (default: 3)
 	Concurrency int            // Number of concurrent workers (default: 4, set to 1 for sequential)
 	OnStatus    StatusCallback // Optional callback for status updates (file started/completed)
+}
+
+// jobWithOffset associates a download job with its base offset in the
+// aggregate progress space so we can report total progress across files.
+type jobWithOffset struct {
+	job        *DownloadJob
+	baseOffset int64
 }
 
 type Downloader interface {
@@ -103,10 +110,6 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 	}
 
 	// Create a channel for distributing jobs to workers
-	type jobWithOffset struct {
-		job        *DownloadJob
-		baseOffset int64
-	}
 	jobChan := make(chan *jobWithOffset, len(jobs))
 
 	// Mutex for protecting shared state
@@ -123,65 +126,8 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-
-			// Process jobs from the channel
 			for jwo := range jobChan {
-				downloaded := false
-				var lastErr error
-
-				// Add to active files and notify status
-				mu.Lock()
-				activeFiles = append(activeFiles, jwo.job.Path)
-				if opts.OnStatus != nil {
-					opts.OnStatus(append([]string{}, activeFiles...), stats.DownloadedFiles, stats.TotalFiles)
-				}
-				mu.Unlock()
-
-				logger.Debug("Starting download: %s (%d bytes)", jwo.job.Path, jwo.job.Size)
-
-				// Try downloading with retries
-				for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
-					if attempt > 0 {
-						logger.Warn("Retrying download (attempt %d/%d): %s - %v", attempt, opts.MaxRetries, jwo.job.Path, lastErr)
-						mu.Lock()
-						stats.Retries++
-						mu.Unlock()
-					}
-
-					err := d.downloadSingleFile(ctx, jwo.job, jwo.baseOffset, totalSize, progress, &mu)
-					if err == nil {
-						downloaded = true
-						mu.Lock()
-						stats.DownloadedFiles++
-						stats.DownloadedBytes += jwo.job.Size
-						mu.Unlock()
-						logger.Info("Successfully downloaded: %s (%d bytes)", jwo.job.Path, jwo.job.Size)
-						break
-					}
-
-					lastErr = err
-					// If this wasn't the last attempt, we'll retry
-				}
-
-				// Remove from active files and notify status
-				mu.Lock()
-				for i, f := range activeFiles {
-					if f == jwo.job.Path {
-						activeFiles = append(activeFiles[:i], activeFiles[i+1:]...)
-						break
-					}
-				}
-				if opts.OnStatus != nil {
-					opts.OnStatus(append([]string{}, activeFiles...), stats.DownloadedFiles, stats.TotalFiles)
-				}
-				mu.Unlock()
-
-				if !downloaded {
-					mu.Lock()
-					stats.FailedFiles++
-					mu.Unlock()
-					logger.Error("Failed to download after %d attempts: %s - %v", opts.MaxRetries+1, jwo.job.Path, lastErr)
-				}
+				d.processDownloadJob(ctx, jwo, stats, totalSize, progress, opts, &mu, &activeFiles)
 			}
 		}()
 	}
@@ -203,11 +149,80 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 	return stats, nil
 }
 
+// processDownloadJob processes jobs from jobChan, handling retries, stats, and status updates.
+func (d *downloader) processDownloadJob(
+	ctx context.Context,
+	jwo *jobWithOffset,
+	stats *DownloadStats,
+	totalSize int64,
+	progress ProgressCallback,
+	opts *DownloadOptions,
+	mu *sync.Mutex,
+	activeFiles *[]string,
+) {
+	downloaded := false
+	var lastErr error
+
+	// Add to active files and notify status
+	mu.Lock()
+	*activeFiles = append(*activeFiles, jwo.job.Path)
+	if opts.OnStatus != nil {
+		opts.OnStatus(append([]string{}, *activeFiles...), stats.DownloadedFiles, stats.TotalFiles)
+	}
+	mu.Unlock()
+
+	logger.Debug("Starting download: %s (%d bytes)", jwo.job.Path, jwo.job.Size)
+
+	// Try downloading with retries
+	for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
+		if attempt > 0 {
+			logger.Warn("Retrying download (attempt %d/%d): %s - %v", attempt, opts.MaxRetries, jwo.job.Path, lastErr)
+			mu.Lock()
+			stats.Retries++
+			mu.Unlock()
+		}
+
+		err := d.downloadSingleFile(ctx, jwo.job, jwo.baseOffset, totalSize, progress, mu)
+		if err == nil {
+			downloaded = true
+			mu.Lock()
+			stats.DownloadedFiles++
+			stats.DownloadedBytes += jwo.job.Size
+			mu.Unlock()
+			logger.Info("Successfully downloaded: %s (%d bytes)", jwo.job.Path, jwo.job.Size)
+			break
+		}
+
+		lastErr = err
+		// If this wasn't the last attempt, we'll retry
+	}
+
+	// Remove from active files and notify status
+	mu.Lock()
+	for i, f := range *activeFiles {
+		if f == jwo.job.Path {
+			*activeFiles = append((*activeFiles)[:i], (*activeFiles)[i+1:]...)
+			break
+		}
+	}
+	if opts.OnStatus != nil {
+		opts.OnStatus(append([]string{}, *activeFiles...), stats.DownloadedFiles, stats.TotalFiles)
+	}
+	mu.Unlock()
+
+	if !downloaded {
+		mu.Lock()
+		stats.FailedFiles++
+		mu.Unlock()
+		logger.Error("Failed to download after %d attempts: %s - %v", opts.MaxRetries+1, jwo.job.Path, lastErr)
+	}
+}
+
 // downloadSingleFile downloads a single file
 func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, baseOffset int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex) error {
 	// Create target directory if needed
 	targetDir := filepath.Dir(job.OutputPath)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
