@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/flaneur2020/stargz-get/logger"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -118,9 +119,12 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 				downloaded := false
 				var lastErr error
 
+				logger.Debug("Starting download: %s (%d bytes)", jwo.job.Path, jwo.job.Size)
+
 				// Try downloading with retries
 				for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
 					if attempt > 0 {
+						logger.Warn("Retrying download (attempt %d/%d): %s - %v", attempt, opts.MaxRetries, jwo.job.Path, lastErr)
 						mu.Lock()
 						stats.Retries++
 						mu.Unlock()
@@ -133,6 +137,7 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 						stats.DownloadedFiles++
 						stats.DownloadedBytes += jwo.job.Size
 						mu.Unlock()
+						logger.Info("Successfully downloaded: %s (%d bytes)", jwo.job.Path, jwo.job.Size)
 						break
 					}
 
@@ -144,8 +149,7 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 					mu.Lock()
 					stats.FailedFiles++
 					mu.Unlock()
-					// Optionally log the error (for now we continue with next file)
-					_ = lastErr
+					logger.Error("Failed to download after %d attempts: %s - %v", opts.MaxRetries+1, jwo.job.Path, lastErr)
 				}
 			}
 		}()

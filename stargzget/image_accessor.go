@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/containerd/stargz-snapshotter/estargz"
+	"github.com/flaneur2020/stargz-get/logger"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -316,12 +317,17 @@ func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string
 func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*estargz.JTOC, error) {
 	// Check cache
 	if toc, ok := i.tocCache[blobDigest]; ok {
+		logger.Debug("TOC cache hit for blob: %s", blobDigest[:12])
 		return toc, nil
 	}
+
+	logger.Info("Downloading TOC for blob: %s", blobDigest[:12]+"...")
 
 	// Construct blob URL
 	scheme := getScheme(i.registry)
 	blobURL := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", scheme, i.registry, i.repository, blobDigest)
+
+	logger.Debug("TOC URL: %s", blobURL)
 
 	// Create a readerat implementation that uses HTTP range requests
 	blobReader := &httpBlobReader{
@@ -335,15 +341,21 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 	// Try to get the size first
 	size, err := blobReader.getSize()
 	if err != nil {
+		logger.Error("Failed to get blob size: %v", err)
 		return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
+
+	logger.Debug("Blob size: %d bytes", size)
 
 	// Get TOC offset using OpenFooter
 	sr := io.NewSectionReader(blobReader, 0, size)
 	tocOffset, _, err := estargz.OpenFooter(sr)
 	if err != nil {
+		logger.Error("Failed to read stargz footer: %v", err)
 		return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
+
+	logger.Debug("TOC offset: %d (%.2f%% of blob)", tocOffset, float64(tocOffset)/float64(size)*100)
 
 	// Read TOC section (from tocOffset to end)
 	tocSectionSize := size - tocOffset

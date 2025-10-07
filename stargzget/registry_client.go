@@ -202,34 +202,34 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 		req.SetBasicAuth(c.username, c.password)
 	}
 
-	Debug("Sending HTTP request: GET %s", url)
+	logger.Debug("Sending HTTP request: GET %s", url)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		Error("HTTP request failed: %v", err)
+		logger.Error("HTTP request failed: %v", err)
 		return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 	}
 	defer resp.Body.Close()
 
-	Debug("Received HTTP response: %d %s", resp.StatusCode, resp.Status)
+	logger.Debug("Received HTTP response: %d %s", resp.StatusCode, resp.Status)
 
 	var token string
 	// Handle 401 with token auth
 	if resp.StatusCode == http.StatusUnauthorized {
-		Info("Authentication required, fetching token...")
+		logger.Info("Authentication required, fetching token...")
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
 		if wwwAuth == "" {
 			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("got 401 but no WWW-Authenticate header"))
 		}
 
-		Debug("WWW-Authenticate: %s", wwwAuth)
+		logger.Debug("WWW-Authenticate: %s", wwwAuth)
 
 		token, err = c.getAuthToken(ctx, registry, repository, wwwAuth)
 		if err != nil {
-			Error("Failed to get auth token: %v", err)
+			logger.Error("Failed to get auth token: %v", err)
 			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
 
-		Info("Successfully obtained auth token")
+		logger.Info("Successfully obtained auth token")
 
 		// Retry with token
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)

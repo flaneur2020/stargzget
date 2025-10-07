@@ -133,17 +133,62 @@
 
 ---
 
+### Phase 6: Multi-threaded Downloading ✅
+**Goal**: Parallel file downloads for performance
+
+**Completed Features**:
+- [x] Implement worker pool with configurable size (default: 4)
+- [x] Add job queue with concurrency control via channels
+- [x] Coordinate progress tracking across workers with mutex protection
+- [x] Pre-allocate progress offsets for each file to avoid race conditions
+- [x] Add `--concurrency` flag to CLI
+- [x] Comprehensive concurrency testing (1/2/4/8 workers)
+- [x] Race detector validation passed
+- [x] **Validation**: All tests passing (30/30)
+
+**Implementation Details**:
+- Worker pool using goroutines and channels
+- Mutex-protected stats updates
+- Pre-computed baseOffset for accurate progress tracking
+- Supports both sequential (concurrency=1) and parallel downloads
+
+**Status**: Fully implemented and tested (multi-file download only; single-file chunking not implemented)
+
+---
+
+### Phase 13: Verbose Logging ✅
+**Goal**: Better debugging and troubleshooting
+
+**Completed Features**:
+- [x] Add `--verbose` flag for detailed logging (INFO level)
+- [x] Add `--debug` flag for developer debugging (DEBUG level)
+- [x] Log HTTP requests and responses in RegistryClient
+- [x] Log TOC download and parsing steps in ImageAccessor
+- [x] Log retry attempts with reasons in Downloader
+- [x] Redact sensitive info (auth tokens, passwords)
+- [x] **Validation**: Tested with real stargz images
+
+**Implementation Details**:
+- Created standalone `logger` package with log levels: DEBUG, INFO, WARN, ERROR, SILENT
+- Timestamp-based log format: `[HH:MM:SS.mmm] LEVEL: message`
+- Automatic redaction of Authorization headers and token parameters
+- Global log level controlled by CLI flags
+
+**Status**: Fully implemented and tested
+
+---
+
 ## Future Enhancements 🚧
 
-### Phase 6: Multi-threaded Downloading
-**Goal**: Parallel chunk downloads for performance
+### Phase 6.1: Single File Chunked Download (Not Implemented)
+**Goal**: Parallel chunk downloads for single large files
 
 **Planned Features**:
-- [ ] Implement worker pool with configurable size (default: 4)
-- [ ] Add job queue with concurrency control
-- [ ] Coordinate progress tracking across workers
-- [ ] Add rate limiting to respect registry limits
-- [ ] **Parallel download for single large file**: Split large files into chunks and download in parallel
+- [ ] Detect file size threshold (e.g., > 10MB)
+- [ ] Split into chunks (e.g., 4MB each)
+- [ ] Use HTTP Range requests for concurrent chunk downloads
+- [ ] Reassemble chunks in correct order
+- [ ] Handle chunk retry independently
 - [ ] **Validation**: Compare download time vs sequential download
 
 **Design Considerations**:
@@ -222,23 +267,25 @@
 
 ---
 
-### Phase 13: Verbose Logging
+### Phase 13: Verbose Logging ✅
 **Goal**: Better debugging and troubleshooting
 
-**Planned Features**:
-- [ ] Add `--verbose` flag for detailed logging
-- [ ] Log HTTP requests and responses
-- [ ] Log TOC download and parsing steps
-- [ ] Log retry attempts with reasons
-- [ ] Add `--debug` flag for developer debugging
-- [ ] **Validation**: Debug real-world issues
+**Completed Features**:
+- [x] Add `--verbose` flag for detailed logging (INFO level)
+- [x] Add `--debug` flag for developer debugging (DEBUG level)
+- [x] Log HTTP requests and responses in RegistryClient
+- [x] Log TOC download and parsing steps in ImageAccessor
+- [x] Log retry attempts with reasons in Downloader
+- [x] Redact sensitive info (auth tokens, passwords)
+- [x] **Validation**: Tested with real stargz images
 
-**Design Considerations**:
-- Use structured logging (e.g., logrus or zap)
-- Log levels: DEBUG, INFO, WARN, ERROR
-- Redact sensitive info (auth tokens)
+**Implementation Details**:
+- Created standalone `logger` package with log levels: DEBUG, INFO, WARN, ERROR, SILENT
+- Timestamp-based log format: `[HH:MM:SS.mmm] LEVEL: message`
+- Automatic redaction of Authorization headers and token parameters
+- Global log level controlled by CLI flags
 
-**Estimated Effort**: Small (1-2 days)
+**Status**: Fully implemented and tested
 
 ---
 
