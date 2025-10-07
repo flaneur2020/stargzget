@@ -267,28 +267,6 @@
 
 ---
 
-### Phase 13: Verbose Logging ✅
-**Goal**: Better debugging and troubleshooting
-
-**Completed Features**:
-- [x] Add `--verbose` flag for detailed logging (INFO level)
-- [x] Add `--debug` flag for developer debugging (DEBUG level)
-- [x] Log HTTP requests and responses in RegistryClient
-- [x] Log TOC download and parsing steps in ImageAccessor
-- [x] Log retry attempts with reasons in Downloader
-- [x] Redact sensitive info (auth tokens, passwords)
-- [x] **Validation**: Tested with real stargz images
-
-**Implementation Details**:
-- Created standalone `logger` package with log levels: DEBUG, INFO, WARN, ERROR, SILENT
-- Timestamp-based log format: `[HH:MM:SS.mmm] LEVEL: message`
-- Automatic redaction of Authorization headers and token parameters
-- Global log level controlled by CLI flags
-
-**Status**: Fully implemented and tested
-
----
-
 ### Phase 14: Configuration File
 **Goal**: Persistent configuration
 
