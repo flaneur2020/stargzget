@@ -95,11 +95,14 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 	}
 
 	// Create a channel for distributing jobs to workers
-	jobChan := make(chan *DownloadJob, len(jobs))
+	type jobWithOffset struct {
+		job        *DownloadJob
+		baseOffset int64
+	}
+	jobChan := make(chan *jobWithOffset, len(jobs))
 
 	// Mutex for protecting shared state
 	var mu sync.Mutex
-	var currentTotal int64
 
 	// WaitGroup to wait for all workers to complete
 	var wg sync.WaitGroup
@@ -111,7 +114,7 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 			defer wg.Done()
 
 			// Process jobs from the channel
-			for job := range jobChan {
+			for jwo := range jobChan {
 				downloaded := false
 				var lastErr error
 
@@ -123,13 +126,12 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 						mu.Unlock()
 					}
 
-					err := d.downloadSingleFile(ctx, job, &currentTotal, totalSize, progress, &mu)
+					err := d.downloadSingleFile(ctx, jwo.job, jwo.baseOffset, totalSize, progress, &mu)
 					if err == nil {
 						downloaded = true
 						mu.Lock()
-						currentTotal += job.Size
 						stats.DownloadedFiles++
-						stats.DownloadedBytes += job.Size
+						stats.DownloadedBytes += jwo.job.Size
 						mu.Unlock()
 						break
 					}
@@ -149,9 +151,14 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 		}()
 	}
 
-	// Send all jobs to the channel
+	// Send all jobs to the channel with pre-calculated offsets
+	var currentOffset int64
 	for _, job := range jobs {
-		jobChan <- job
+		jobChan <- &jobWithOffset{
+			job:        job,
+			baseOffset: currentOffset,
+		}
+		currentOffset += job.Size
 	}
 	close(jobChan)
 
@@ -162,7 +169,7 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 }
 
 // downloadSingleFile downloads a single file
-func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, currentTotal *int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex) error {
+func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, baseOffset int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex) error {
 	// Create target directory if needed
 	targetDir := filepath.Dir(job.OutputPath)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -191,7 +198,7 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, c
 			total:  job.Size,
 			callback: func(current, total int64) {
 				mu.Lock()
-				progress(*currentTotal+current, totalSize)
+				progress(baseOffset+current, totalSize)
 				mu.Unlock()
 			},
 		}
