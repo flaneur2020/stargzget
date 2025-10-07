@@ -87,6 +87,22 @@ func parseImageRef(imageRef string) (string, string, string, error) {
 	return registry, repository, tag, nil
 }
 
+// getScheme returns http for localhost/127.0.0.1, otherwise https
+func getScheme(registry string) string {
+	// Extract host without port
+	host := registry
+	if idx := strings.Index(registry, ":"); idx != -1 {
+		host = registry[:idx]
+	}
+
+	// Use http for localhost and 127.0.0.1
+	if host == "localhost" || host == "127.0.0.1" {
+		return "http"
+	}
+
+	return "https"
+}
+
 type authResponse struct {
 	Token       string `json:"token"`
 	AccessToken string `json:"access_token"`
@@ -238,7 +254,7 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 		manifestDigest := manifest.Manifests[0].Digest
 
 		// Fetch the actual manifest by digest
-		url = fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, manifestDigest)
+		url = fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, registry, repository, manifestDigest)
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return nil, ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)

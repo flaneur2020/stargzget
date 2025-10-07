@@ -320,7 +320,8 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 	}
 
 	// Construct blob URL
-	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", i.registry, i.repository, blobDigest)
+	scheme := getScheme(i.registry)
+	blobURL := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", scheme, i.registry, i.repository, blobDigest)
 
 	// Create a readerat implementation that uses HTTP range requests
 	blobReader := &httpBlobReader{
@@ -611,7 +612,8 @@ func (i *imageAccessor) OpenFile(ctx context.Context, path string, blobDigest di
 	}
 
 	// Construct blob URL
-	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", i.registry, i.repository, blobDigest.String())
+	scheme := getScheme(i.registry)
+	blobURL := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", scheme, i.registry, i.repository, blobDigest.String())
 
 	// Create a blob reader
 	blobReader := &httpBlobReader{
