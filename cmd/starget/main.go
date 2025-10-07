@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	credential string
-	noProgress bool
+	credential  string
+	noProgress  bool
+	concurrency int
 )
 
 func main() {
@@ -50,6 +51,7 @@ func main() {
 		Run:   runGet,
 	}
 	getCmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress bar (progress is enabled by default)")
+	getCmd.Flags().IntVar(&concurrency, "concurrency", 4, "Number of concurrent workers (default: 4, set to 1 for sequential)")
 
 	rootCmd.AddCommand(infoCmd, lsCmd, getCmd)
 
@@ -337,8 +339,12 @@ func runGet(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Start download with default options (3 retries)
-	stats, err := downloader.StartDownload(ctx, jobs, progressCallback, nil)
+	// Start download with custom options
+	opts := &stargzget.DownloadOptions{
+		MaxRetries:  3,
+		Concurrency: concurrency,
+	}
+	stats, err := downloader.StartDownload(ctx, jobs, progressCallback, opts)
 	if err != nil {
 		if showProgress {
 			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)

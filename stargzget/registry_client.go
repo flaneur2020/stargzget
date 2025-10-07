@@ -160,7 +160,8 @@ func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Man
 	}
 
 	// Construct OCI registry API URL
-	url := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tag)
+	scheme := getScheme(registry)
+	url := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, registry, repository, tag)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

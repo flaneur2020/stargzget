@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/opencontainers/go-digest"
 )
@@ -34,7 +35,8 @@ type DownloadStats struct {
 
 // DownloadOptions configures download behavior
 type DownloadOptions struct {
-	MaxRetries int // Maximum number of retries per file (default: 3)
+	MaxRetries  int // Maximum number of retries per file (default: 3)
+	Concurrency int // Number of concurrent workers (default: 4, set to 1 for sequential)
 }
 
 type Downloader interface {
@@ -61,8 +63,19 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 	// Use default options if not provided
 	if opts == nil {
 		opts = &DownloadOptions{
-			MaxRetries: 3,
+			MaxRetries:  3,
+			Concurrency: 4,
 		}
+	}
+
+	// Set default concurrency if not specified
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 4
+	}
+
+	// Set default max retries if not specified
+	if opts.MaxRetries <= 0 {
+		opts.MaxRetries = 3
 	}
 
 	// Calculate total size
@@ -81,44 +94,75 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 		progress(0, totalSize)
 	}
 
+	// Create a channel for distributing jobs to workers
+	jobChan := make(chan *DownloadJob, len(jobs))
+
+	// Mutex for protecting shared state
+	var mu sync.Mutex
 	var currentTotal int64
 
-	// Download each file with retry support
-	for _, job := range jobs {
-		downloaded := false
-		var lastErr error
+	// WaitGroup to wait for all workers to complete
+	var wg sync.WaitGroup
 
-		// Try downloading with retries
-		for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
-			if attempt > 0 {
-				stats.Retries++
+	// Start worker goroutines
+	for i := 0; i < opts.Concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Process jobs from the channel
+			for job := range jobChan {
+				downloaded := false
+				var lastErr error
+
+				// Try downloading with retries
+				for attempt := 0; attempt <= opts.MaxRetries; attempt++ {
+					if attempt > 0 {
+						mu.Lock()
+						stats.Retries++
+						mu.Unlock()
+					}
+
+					err := d.downloadSingleFile(ctx, job, &currentTotal, totalSize, progress, &mu)
+					if err == nil {
+						downloaded = true
+						mu.Lock()
+						currentTotal += job.Size
+						stats.DownloadedFiles++
+						stats.DownloadedBytes += job.Size
+						mu.Unlock()
+						break
+					}
+
+					lastErr = err
+					// If this wasn't the last attempt, we'll retry
+				}
+
+				if !downloaded {
+					mu.Lock()
+					stats.FailedFiles++
+					mu.Unlock()
+					// Optionally log the error (for now we continue with next file)
+					_ = lastErr
+				}
 			}
-
-			err := d.downloadSingleFile(ctx, job, &currentTotal, totalSize, progress)
-			if err == nil {
-				downloaded = true
-				currentTotal += job.Size
-				stats.DownloadedFiles++
-				stats.DownloadedBytes += job.Size
-				break
-			}
-
-			lastErr = err
-			// If this wasn't the last attempt, we'll retry
-		}
-
-		if !downloaded {
-			stats.FailedFiles++
-			// Optionally log the error (for now we continue with next file)
-			_ = lastErr
-		}
+		}()
 	}
+
+	// Send all jobs to the channel
+	for _, job := range jobs {
+		jobChan <- job
+	}
+	close(jobChan)
+
+	// Wait for all workers to complete
+	wg.Wait()
 
 	return stats, nil
 }
 
 // downloadSingleFile downloads a single file
-func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, currentTotal *int64, totalSize int64, progress ProgressCallback) error {
+func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, currentTotal *int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex) error {
 	// Create target directory if needed
 	targetDir := filepath.Dir(job.OutputPath)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
@@ -141,12 +185,14 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, c
 	// Wrap fileReader with progress tracking if callback is provided
 	var readerToUse io.Reader = fileReader
 	if progress != nil {
-		// Update total progress bar
+		// Update total progress bar with mutex protection
 		readerToUse = &progressReader{
 			reader: fileReader,
 			total:  job.Size,
 			callback: func(current, total int64) {
+				mu.Lock()
 				progress(*currentTotal+current, totalSize)
+				mu.Unlock()
 			},
 		}
 	}

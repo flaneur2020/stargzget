@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -201,6 +202,7 @@ type mockFailingAccessor struct {
 	files        map[string][]byte
 	failCount    map[string]int // path -> number of times to fail
 	attemptCount map[string]int // path -> current attempt count
+	mu           sync.Mutex     // protects attemptCount
 }
 
 func (m *mockFailingAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
@@ -208,6 +210,9 @@ func (m *mockFailingAccessor) ImageIndex(ctx context.Context) (*ImageIndex, erro
 }
 
 func (m *mockFailingAccessor) OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.attemptCount == nil {
 		m.attemptCount = make(map[string]int)
 	}
@@ -351,5 +356,181 @@ func TestDownloader_StartDownload_WithRetries(t *testing.T) {
 				t.Errorf("Retries = %d, want %d", stats.Retries, tt.wantRetries)
 			}
 		})
+	}
+}
+
+func TestDownloader_Concurrency(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "downloader-concurrency-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create mock accessor with multiple files
+	mockAccessor := &mockImageAccessor{
+		files: map[string][]byte{
+			"file1": []byte("content1"),
+			"file2": []byte("content2"),
+			"file3": []byte("content3"),
+			"file4": []byte("content4"),
+			"file5": []byte("content5"),
+			"file6": []byte("content6"),
+			"file7": []byte("content7"),
+			"file8": []byte("content8"),
+		},
+	}
+
+	downloader := NewDownloader(mockAccessor)
+
+	// Create 8 download jobs
+	var jobs []*DownloadJob
+	for i := 1; i <= 8; i++ {
+		path := "file" + string(rune('0'+i))
+		jobs = append(jobs, &DownloadJob{
+			Path:       path,
+			BlobDigest: digest.FromString("test"),
+			Size:       8,
+			OutputPath: filepath.Join(tempDir, path),
+		})
+	}
+
+	tests := []struct {
+		name        string
+		concurrency int
+		wantFiles   int
+		wantBytes   int64
+	}{
+		{
+			name:        "sequential (concurrency=1)",
+			concurrency: 1,
+			wantFiles:   8,
+			wantBytes:   64,
+		},
+		{
+			name:        "parallel with 2 workers",
+			concurrency: 2,
+			wantFiles:   8,
+			wantBytes:   64,
+		},
+		{
+			name:        "parallel with 4 workers",
+			concurrency: 4,
+			wantFiles:   8,
+			wantBytes:   64,
+		},
+		{
+			name:        "parallel with 8 workers",
+			concurrency: 8,
+			wantFiles:   8,
+			wantBytes:   64,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &DownloadOptions{
+				MaxRetries:  3,
+				Concurrency: tt.concurrency,
+			}
+
+			stats, err := downloader.StartDownload(context.Background(), jobs, nil, opts)
+			if err != nil {
+				t.Errorf("StartDownload() error = %v", err)
+				return
+			}
+
+			if stats.DownloadedFiles != tt.wantFiles {
+				t.Errorf("DownloadedFiles = %d, want %d", stats.DownloadedFiles, tt.wantFiles)
+			}
+
+			if stats.DownloadedBytes != tt.wantBytes {
+				t.Errorf("DownloadedBytes = %d, want %d", stats.DownloadedBytes, tt.wantBytes)
+			}
+
+			if stats.FailedFiles != 0 {
+				t.Errorf("FailedFiles = %d, want 0", stats.FailedFiles)
+			}
+
+			// Verify all files were created with correct content
+			for i := 1; i <= 8; i++ {
+				path := "file" + string(rune('0'+i))
+				content, err := os.ReadFile(filepath.Join(tempDir, path))
+				if err != nil {
+					t.Errorf("Failed to read file %s: %v", path, err)
+					continue
+				}
+
+				expectedContent := "content" + string(rune('0'+i))
+				if string(content) != expectedContent {
+					t.Errorf("File %s content = %q, want %q", path, string(content), expectedContent)
+				}
+			}
+
+			// Clean up files for next test
+			os.RemoveAll(tempDir)
+			os.MkdirAll(tempDir, 0755)
+		})
+	}
+}
+
+func TestDownloader_ConcurrencyWithRetries(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "downloader-concurrency-retry-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create failing accessor where different files fail different times
+	mockAccessor := &mockFailingAccessor{
+		files: map[string][]byte{
+			"file1": []byte("content1"),
+			"file2": []byte("content2"),
+			"file3": []byte("content3"),
+			"file4": []byte("content4"),
+		},
+		failCount: map[string]int{
+			"file1": 0, // succeed immediately
+			"file2": 1, // fail once
+			"file3": 2, // fail twice
+			"file4": 3, // fail three times (will ultimately fail with maxRetries=2)
+		},
+		attemptCount: make(map[string]int),
+	}
+
+	downloader := NewDownloader(mockAccessor)
+
+	jobs := []*DownloadJob{
+		{Path: "file1", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file1")},
+		{Path: "file2", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file2")},
+		{Path: "file3", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file3")},
+		{Path: "file4", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file4")},
+	}
+
+	opts := &DownloadOptions{
+		MaxRetries:  2,
+		Concurrency: 2,
+	}
+
+	stats, err := downloader.StartDownload(context.Background(), jobs, nil, opts)
+	if err != nil {
+		t.Errorf("StartDownload() unexpected error: %v", err)
+		return
+	}
+
+	// file1: success (0 retries)
+	// file2: success after 1 retry (1 retry)
+	// file3: success after 2 retries (2 retries)
+	// file4: fail after 2 retries (2 retries)
+	// Total: 3 success, 1 failed, 5 retries
+	if stats.DownloadedFiles != 3 {
+		t.Errorf("DownloadedFiles = %d, want 3", stats.DownloadedFiles)
+	}
+
+	if stats.FailedFiles != 1 {
+		t.Errorf("FailedFiles = %d, want 1", stats.FailedFiles)
+	}
+
+	if stats.Retries != 5 {
+		t.Errorf("Retries = %d, want 5", stats.Retries)
 	}
 }
