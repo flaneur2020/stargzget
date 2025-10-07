@@ -36,17 +36,17 @@ func main() {
 
 	// ls command
 	lsCmd := &cobra.Command{
-		Use:   "ls <REGISTRY>/<IMAGE>:<TAG> <BLOB>",
-		Short: "List files in a blob",
-		Args:  cobra.ExactArgs(2),
+		Use:   "ls <REGISTRY>/<IMAGE>:<TAG> [BLOB]",
+		Short: "List files in a blob (or all files if blob is not specified)",
+		Args:  cobra.RangeArgs(1, 2),
 		Run:   runLs,
 	}
 
 	// get command
 	getCmd := &cobra.Command{
-		Use:   "get <REGISTRY>/<IMAGE>:<TAG> <BLOB> <PATH> [OUTPUT_DIR]",
-		Short: "Download file or directory from a blob. Use '.' or '/' for all files, or specify a directory path",
-		Args:  cobra.RangeArgs(3, 4),
+		Use:   "get <REGISTRY>/<IMAGE>:<TAG> [BLOB] <PATH> [OUTPUT_DIR]",
+		Short: "Download file or directory. BLOB is optional (uses top layer if not specified). Use '.' or '/' for all files",
+		Args:  cobra.RangeArgs(2, 4),
 		Run:   runGet,
 	}
 	getCmd.Flags().BoolVar(&noProgress, "no-progress", false, "Disable progress bar (progress is enabled by default)")
@@ -115,7 +115,10 @@ func runInfo(cmd *cobra.Command, args []string) {
 
 func runLs(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
-	blobDigest := args[1]
+	var blobDigest string
+	if len(args) > 1 {
+		blobDigest = args[1]
+	}
 
 	registry, repository, err := parseImageRef(imageRef)
 	if err != nil {
@@ -151,12 +154,6 @@ func runLs(cmd *cobra.Command, args []string) {
 		imageAccessor = imageAccessor.WithCredential(username, password)
 	}
 
-	dgst, err := digest.Parse(blobDigest)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing digest: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Get image index
 	index, err := imageAccessor.ImageIndex(context.Background())
 	if err != nil {
@@ -164,34 +161,65 @@ func runLs(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Find the layer with the specified blob digest
-	var files []string
-	for _, layer := range index.Layers {
-		if layer.BlobDigest == dgst {
-			files = layer.Files
-			break
+	// If blob digest is provided, list files in that specific blob
+	if blobDigest != "" {
+		dgst, err := digest.Parse(blobDigest)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing digest: %v\n", err)
+			os.Exit(1)
 		}
-	}
 
-	if files == nil {
-		fmt.Fprintf(os.Stderr, "Blob not found: %s\n", blobDigest)
-		os.Exit(1)
-	}
+		// Find the layer with the specified blob digest
+		var files []string
+		for _, layer := range index.Layers {
+			if layer.BlobDigest == dgst {
+				files = layer.Files
+				break
+			}
+		}
 
-	fmt.Printf("Files in blob %s:\n", blobDigest)
-	for _, file := range files {
-		fmt.Println(file)
+		if files == nil {
+			fmt.Fprintf(os.Stderr, "Blob not found: %s\n", blobDigest)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Files in blob %s:\n", blobDigest)
+		for _, file := range files {
+			fmt.Println(file)
+		}
+	} else {
+		// No blob digest provided - list all files from all layers (later layers override earlier ones)
+		fmt.Printf("All files in %s:\n", imageRef)
+		for _, path := range index.AllFiles() {
+			fmt.Println(path)
+		}
 	}
 }
 
 func runGet(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
-	blobDigest := args[1]
-	pathPattern := args[2]
 
-	outputDir := "."
-	if len(args) > 3 {
-		outputDir = args[3]
+	// Parse arguments based on count and whether second arg looks like a digest
+	var blobDigest string
+	var pathPattern string
+	var outputDir string = "."
+
+	// Determine if second argument is a blob digest (starts with sha256: or sha512:)
+	hasBlob := len(args) >= 3 && strings.HasPrefix(args[1], "sha")
+
+	if hasBlob {
+		// args: imageRef, blob, path, [outputDir]
+		blobDigest = args[1]
+		pathPattern = args[2]
+		if len(args) > 3 {
+			outputDir = args[3]
+		}
+	} else {
+		// args: imageRef, path, [outputDir]
+		pathPattern = args[1]
+		if len(args) > 2 {
+			outputDir = args[2]
+		}
 	}
 
 	ctx := context.Background()
@@ -232,12 +260,17 @@ func runGet(cmd *cobra.Command, args []string) {
 
 	downloader := stargzget.NewDownloader(imageAccessor)
 
-	// Parse blob digest
-	dgst, err := digest.Parse(blobDigest)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing digest: %v\n", err)
-		os.Exit(1)
+	// Parse blob digest if provided
+	var dgst digest.Digest
+	if blobDigest != "" {
+		var err error
+		dgst, err = digest.Parse(blobDigest)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing digest: %v\n", err)
+			os.Exit(1)
+		}
 	}
+	// If blobDigest is empty, dgst will be zero value and FilterFiles will use all layers
 
 	// Get image index
 	index, err := imageAccessor.ImageIndex(ctx)
@@ -251,7 +284,7 @@ func runGet(cmd *cobra.Command, args []string) {
 		pathPattern = "."
 	}
 
-	// Filter files based on pattern and blob digest
+	// Filter files based on pattern and blob digest (empty digest means search all layers)
 	matchedFiles := index.FilterFiles(pathPattern, dgst)
 	if len(matchedFiles) == 0 {
 		fmt.Fprintf(os.Stderr, "No files matched pattern: %s\n", pathPattern)

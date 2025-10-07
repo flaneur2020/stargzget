@@ -9,7 +9,7 @@ A lightweight CLI tool for downloading files from stargz (seekable tar.gz) conta
 - **Progress Tracking**: Real-time progress bars with download speed indicators
 - **Automatic Retry**: Built-in retry logic (default: 3 retries) for failed downloads
 - **Layer Inspection**: List and explore stargz image layers
-- **Public Registry Support**: Works with public registries like ghcr.io
+- **Registry Support**: Works with both public and private registries (Basic Auth)
 
 ## Quick Start
 
@@ -26,13 +26,23 @@ List image layers:
 starget info ghcr.io/stargz-containers/node:13.13.0-esgz
 ```
 
+List all files (from all layers, later layers override earlier ones):
+```bash
+starget ls ghcr.io/stargz-containers/node:13.13.0-esgz
+```
+
 List files in a specific layer:
 ```bash
 starget ls ghcr.io/stargz-containers/node:13.13.0-esgz \
   sha256:c411ef59488b73d06c19343d72eb816549577b3e0429516dcca5789d7a9a4000
 ```
 
-Download a single file:
+Download a single file (from top layer):
+```bash
+starget get ghcr.io/stargz-containers/node:13.13.0-esgz bin/echo output/echo
+```
+
+Download a single file from a specific layer:
 ```bash
 starget get ghcr.io/stargz-containers/node:13.13.0-esgz \
   sha256:c411ef59488b73d06c19343d72eb816549577b3e0429516dcca5789d7a9a4000 \
@@ -41,16 +51,12 @@ starget get ghcr.io/stargz-containers/node:13.13.0-esgz \
 
 Download a directory:
 ```bash
-starget get ghcr.io/stargz-containers/node:13.13.0-esgz \
-  sha256:c411ef59488b73d06c19343d72eb816549577b3e0429516dcca5789d7a9a4000 \
-  bin/ output/
+starget get ghcr.io/stargz-containers/node:13.13.0-esgz bin/ output/
 ```
 
 Download all files:
 ```bash
-starget get ghcr.io/stargz-containers/node:13.13.0-esgz \
-  sha256:c411ef59488b73d06c19343d72eb816549577b3e0429516dcca5789d7a9a4000 \
-  . output/
+starget get ghcr.io/stargz-containers/node:13.13.0-esgz . output/
 ```
 
 Use with private registries (requires authentication):
@@ -72,24 +78,28 @@ starget info <REGISTRY>/<IMAGE>:<TAG>
 
 ### `starget ls`
 
-List files in a specific blob/layer.
+List files in the image. If blob digest is not specified, lists all files from all layers (later layers override earlier ones).
 
 ```bash
-starget ls <REGISTRY>/<IMAGE>:<TAG> <BLOB_DIGEST>
+starget ls <REGISTRY>/<IMAGE>:<TAG> [BLOB_DIGEST]
 ```
 
 ### `starget get`
 
-Download files from a blob/layer.
+Download files from the image. If blob digest is not specified, downloads from the top layer (where the file exists).
 
 ```bash
-starget get <REGISTRY>/<IMAGE>:<TAG> <BLOB_DIGEST> <PATH_PATTERN> [OUTPUT_DIR]
+starget get <REGISTRY>/<IMAGE>:<TAG> [BLOB_DIGEST] <PATH_PATTERN> [OUTPUT_DIR]
 ```
 
 **Path Patterns:**
 - Specific file: `bin/echo`
 - Directory: `bin/` or `bin`
 - All files: `.` or `/`
+
+**Notes:**
+- `BLOB_DIGEST` is optional. When omitted, files from the top layer are used (following overlay semantics)
+- Second argument is auto-detected: if it starts with `sha`, it's treated as blob digest; otherwise as path pattern
 
 **Flags:**
 - `--no-progress`: Disable progress bar (useful for scripts)
@@ -142,9 +152,10 @@ See [DESIGN.md](DESIGN.md#testing-strategy) for more details.
 - Automatic retry logic
 - Structured error handling
 - Comprehensive unit tests
+- Basic authentication support (HTTP Basic Auth + Bearer tokens)
 
 ### In Progress 🚧
-- Authentication support for private registries
+- Advanced authentication (Docker config.json integration)
 - Multi-threaded downloads
 - Checksum verification
 

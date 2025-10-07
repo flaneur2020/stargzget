@@ -36,6 +36,15 @@ type ImageIndex struct {
 	files map[string]*FileInfo
 }
 
+// AllFiles returns all file paths in the index (from all layers, later layers override earlier ones)
+func (idx *ImageIndex) AllFiles() []string {
+	paths := make([]string, 0, len(idx.files))
+	for path := range idx.files {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
 // FindFile finds a file in the image index
 // If blobDigest is empty, it searches all layers for the file
 // If blobDigest is provided, it only searches within that specific blob

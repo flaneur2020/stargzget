@@ -162,24 +162,27 @@
 
 ---
 
-### Phase 7: Authentication Support
+### Phase 7: Authentication Support ✅ (Partial)
 **Goal**: Support private registries
 
-**Planned Features**:
-- [ ] Implement `--credential=<USER:PASSWORD>` flag parsing
-- [ ] Add HTTP Basic Auth header to registry requests
-- [ ] Add token-based auth flow (for registries like Docker Hub)
+**Completed Features**:
+- [x] Implement `--credential=<USER:PASSWORD>` flag parsing
+- [x] Add HTTP Basic Auth header to registry requests
+- [x] Token-based auth flow (Bearer token support)
+- [x] Basic mocked tests for authentication
+
+**Remaining Features**:
 - [ ] Support Docker config.json credential helper
 - [ ] Add credential caching
-- [ ] **Validation**: Download from a private registry with credentials
+- [ ] Integration tests with real private registry
 
 **Design Considerations**:
-- Secure credential handling (no logging)
-- Token refresh logic
-- Support multiple auth schemes
-- Integration with Docker credential helpers
+- Secure credential handling (no logging) ✅
+- Token refresh logic ✅
+- Support multiple auth schemes (Basic + Bearer) ✅
+- Integration with Docker credential helpers (TODO)
 
-**Estimated Effort**: Medium (2-3 days)
+**Status**: Basic Auth and Bearer token support implemented and tested
 
 ---
 
