@@ -334,6 +334,7 @@ func runGet(cmd *cobra.Command, args []string) {
 	showProgress := !noProgress
 
 	var progressCallback stargzget.ProgressCallback
+	var statusCallback stargzget.StatusCallback
 	var bar *progressbar.ProgressBar
 	var initOnce bool
 
@@ -352,12 +353,46 @@ func runGet(cmd *cobra.Command, args []string) {
 				bar.Set64(current)
 			}
 		}
+
+		// Status callback to update progress bar description with active files
+		statusCallback = func(activeFiles []string, completedFiles, totalFiles int) {
+			if bar == nil {
+				return
+			}
+
+			if len(activeFiles) == 0 {
+				// No active files, show completion status
+				bar.Describe(fmt.Sprintf("Completed %d/%d files", completedFiles, totalFiles))
+			} else if len(jobs) == 1 {
+				// Single file download - keep original description
+				return
+			} else {
+				// Multiple files - show active files (up to 3)
+				displayFiles := activeFiles
+				if len(displayFiles) > 3 {
+					displayFiles = displayFiles[:3]
+				}
+
+				// Shorten file paths for display (show only basename)
+				shortNames := make([]string, len(displayFiles))
+				for i, f := range displayFiles {
+					shortNames[i] = filepath.Base(f)
+				}
+
+				desc := fmt.Sprintf("Downloading %s... (%d/%d files)",
+					strings.Join(shortNames, ", "),
+					completedFiles,
+					totalFiles)
+				bar.Describe(desc)
+			}
+		}
 	}
 
 	// Start download with custom options
 	opts := &stargzget.DownloadOptions{
 		MaxRetries:  3,
 		Concurrency: concurrency,
+		OnStatus:    statusCallback,
 	}
 	stats, err := downloader.StartDownload(ctx, jobs, progressCallback, opts)
 	if err != nil {

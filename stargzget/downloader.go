@@ -16,6 +16,12 @@ import (
 // total: total file size (may be -1 if unknown)
 type ProgressCallback func(current int64, total int64)
 
+// StatusCallback is called when download status changes
+// activeFiles: list of files currently being downloaded
+// completedFiles: number of files completed so far
+// totalFiles: total number of files to download
+type StatusCallback func(activeFiles []string, completedFiles int, totalFiles int)
+
 // DownloadJob represents a single file to download
 type DownloadJob struct {
 	Path       string        // File path in the image
@@ -36,8 +42,9 @@ type DownloadStats struct {
 
 // DownloadOptions configures download behavior
 type DownloadOptions struct {
-	MaxRetries  int // Maximum number of retries per file (default: 3)
-	Concurrency int // Number of concurrent workers (default: 4, set to 1 for sequential)
+	MaxRetries  int            // Maximum number of retries per file (default: 3)
+	Concurrency int            // Number of concurrent workers (default: 4, set to 1 for sequential)
+	OnStatus    StatusCallback // Optional callback for status updates (file started/completed)
 }
 
 type Downloader interface {
@@ -105,6 +112,9 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 	// Mutex for protecting shared state
 	var mu sync.Mutex
 
+	// Track active downloads for status updates
+	activeFiles := make([]string, 0, opts.Concurrency)
+
 	// WaitGroup to wait for all workers to complete
 	var wg sync.WaitGroup
 
@@ -118,6 +128,14 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 			for jwo := range jobChan {
 				downloaded := false
 				var lastErr error
+
+				// Add to active files and notify status
+				mu.Lock()
+				activeFiles = append(activeFiles, jwo.job.Path)
+				if opts.OnStatus != nil {
+					opts.OnStatus(append([]string{}, activeFiles...), stats.DownloadedFiles, stats.TotalFiles)
+				}
+				mu.Unlock()
 
 				logger.Debug("Starting download: %s (%d bytes)", jwo.job.Path, jwo.job.Size)
 
@@ -144,6 +162,19 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 					lastErr = err
 					// If this wasn't the last attempt, we'll retry
 				}
+
+				// Remove from active files and notify status
+				mu.Lock()
+				for i, f := range activeFiles {
+					if f == jwo.job.Path {
+						activeFiles = append(activeFiles[:i], activeFiles[i+1:]...)
+						break
+					}
+				}
+				if opts.OnStatus != nil {
+					opts.OnStatus(append([]string{}, activeFiles...), stats.DownloadedFiles, stats.TotalFiles)
+				}
+				mu.Unlock()
 
 				if !downloaded {
 					mu.Lock()
