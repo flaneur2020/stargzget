@@ -26,34 +26,45 @@ The tool is designed around three core principles:
        │                                      │
        v                                      v
 ┌──────────────┐                     ┌────────────────┐
-│ Registry     │                     │  Downloader    │
-│ Client       │                     │                │
+│  Storage      │────────────────────►│  Downloader    │
+│  (Interface)  │                     │                │
 └──────┬───────┘                     └───────┬────────┘
        │                                     │
-       │ GetManifest()                       │ StartDownload()
+       │ ListBlobs(), ReadBlob()             │ StartDownload()
        │                                     │
        v                                     v
 ┌──────────────┐                     ┌────────────────┐
-│  Image       │◄────────────────────┤  ImageIndex    │
-│  Accessor    │                     │                │
-└──────┬───────┘                     └────────────────┘
+│ Registry     │                     │  ImageIndex    │
+│ StorageImpl  │◄────────────────────┤  Loader        │
+└──────────────┘                     └────────────────┘
        │
-       │ ImageIndex()
-       │ OpenFile()
-       │
+       │ HTTP Client (Range Requests)
        v
 ┌──────────────┐
 │  HTTP Client │
-│  (Range      │
-│   Requests)  │
 └──────────────┘
 ```
 
 ### Core Components
 
-#### 1. RegistryClient
+#### 1. Storage & Registry Storage Implementation
 
-**Responsibility**: Communication with OCI-compliant registries
+**Storage Interface**
+
+```go
+type Storage interface {
+    ListBlobs(ctx context.Context) ([]BlobDescriptor, error)
+    ReadBlob(ctx context.Context, digest string, offset int64, length int64) (io.ReadCloser, error)
+}
+
+type BlobDescriptor struct {
+    Digest digest.Digest
+    Size   int64
+    MediaType string
+}
+```
+
+**Registry Storage Implementation**: Implements `Storage` by talking to OCI registries.
 
 **Key Methods**:
 - `GetManifest(imageRef) (*Manifest, error)`: Fetches the image manifest
@@ -78,44 +89,18 @@ type Manifest struct {
 }
 ```
 
-#### 2. ImageAccessor
+#### 2. ImageIndexLoader
 
-**Responsibility**: Manages access to stargz image layers
+**Responsibility**: Builds an `ImageIndex` from a `Storage` instance by reading TOCs and metadata.
 
-**Key Methods**:
-- `ImageIndex(ctx) (*ImageIndex, error)`: Builds an index of all files in the image
-- `OpenFile(ctx, path, blobDigest) (*io.SectionReader, error)`: Opens a file for reading
-
-**Design Decisions**:
-- **Lazy TOC Loading**: Downloads only the stargz Table of Contents (TOC), not the entire blob
-- **TOC Caching**: Caches downloaded TOCs to avoid redundant network requests
-- **HTTP Range Requests**: Uses `Range` headers to fetch only the TOC section at the end of blobs
-- **Deferred Content Download**: File content is fetched on-demand via `OpenFile()`
-
-**TOC Download Process**:
-1. Send HEAD request to get blob size
-2. Calculate TOC offset using the internal `estargzutil.OpenFooter()` helper
-3. Use Range request to fetch TOC section only
-4. Parse TOC as gzipped tar, extract `stargz.index.json`
-5. Unmarshal JSON to get file metadata
-
-**Implementation Details**:
 ```go
-type ImageAccessor interface {
-    ImageIndex(ctx context.Context) (*ImageIndex, error)
-    OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error)
+type ImageIndexLoader interface {
+    Load(ctx context.Context) (*ImageIndex, error)
 }
 
-// Internal structure
-type imageAccessor struct {
-    httpClient     *http.Client
-    registryClient RegistryClient
-    registry       string
-    repository     string
-    manifest       *Manifest
-    tocCache       map[string]*estargzutil.JTOC  // Caches TOCs
-    authToken      string
-    index          *ImageIndex
+type imageIndexLoader struct {
+    storage Storage
+    manifest *Manifest
 }
 ```
 
@@ -155,7 +140,7 @@ type FileInfo struct {
 
 #### 4. Downloader
 
-**Responsibility**: Orchestrates file downloads with progress tracking and retry logic
+**Responsibility**: Orchestrates file downloads using `Storage` for blob reads, with progress tracking and retry logic.
 
 **Key Methods**:
 - `StartDownload(ctx, jobs, progress, options) (*DownloadStats, error)`: Downloads multiple files
@@ -240,13 +225,13 @@ User → CLI
   ↓
 CLI → RegistryClient: GetManifest()
   ↓
-CLI → ImageAccessor: NewImageAccessor(manifest)
+CLI → Storage: NewStorage(manifest)
   ↓
-CLI → ImageAccessor: ImageIndex()
+CLI → ImageIndexLoader: Load()
   ↓
-ImageAccessor → Registry: Download TOC (Range request)
+ImageIndexLoader → ChunkResolver: TOC()
   ↓
-ImageAccessor: Parse TOC, build index
+ChunkResolver → Storage: Download TOC via Range requests
   ↓
 CLI: Filter files by blob digest
   ↓
@@ -262,9 +247,9 @@ User → CLI
   ↓
 CLI → RegistryClient: GetManifest()
   ↓
-CLI → ImageAccessor: NewImageAccessor(manifest)
+CLI → Storage: NewStorage(manifest)
   ↓
-CLI → ImageAccessor: ImageIndex()
+CLI → ImageIndexLoader: Load()
   ↓
 CLI → ImageIndex: FilterFiles(pattern, blob)
   ↓
@@ -273,9 +258,9 @@ CLI: Create DownloadJob list
 CLI → Downloader: StartDownload(jobs, progress, opts)
   ↓
 Downloader (for each job):
-  ├─→ ImageAccessor: OpenFile(path, blob)
-  │   ├─→ Registry: Range request for file chunks
-  │   └─→ Decompress & return SectionReader
+  ├─→ ChunkResolver: FileMetadata(path, blob)
+  ├─→ ChunkResolver: ReadChunk(blob, offset)
+  │   └─→ Storage: Range request + chunk decompression
   ├─→ Write to output file
   └─→ Update progress
   ↓
@@ -325,9 +310,8 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (int, error) {
 ### 3. Caching Strategy
 
 **TOC Caching**:
-- Cache at ImageAccessor level (in-memory)
-- Keyed by blob digest
-- Persists for the lifetime of the accessor
+- ChunkResolver caches parsed TOCs in-memory per blob digest
+- Persists for the lifetime of the resolver instance
 
 **Why not cache file content?**
 - Files can be large (memory constraints)

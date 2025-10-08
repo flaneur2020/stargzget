@@ -10,11 +10,13 @@ import (
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/flaneur2020/stargz-get/stargzget/logger"
+	"github.com/opencontainers/go-digest"
 )
 
 type RegistryClient interface {
 	GetManifest(ctx context.Context, imageRef string) (*Manifest, error)
 	WithCredential(username, password string) RegistryClient
+	NewStorage(registry, repository string, manifest *Manifest) Storage
 }
 
 type Manifest struct {
@@ -63,6 +65,18 @@ func (c *registryClient) WithCredential(username, password string) RegistryClien
 		httpClient: c.httpClient,
 		username:   username,
 		password:   password,
+	}
+}
+
+func (c *registryClient) NewStorage(registry, repository string, manifest *Manifest) Storage {
+	return &registryStorage{
+		client:     c,
+		httpClient: c.httpClient,
+		registry:   registry,
+		repository: repository,
+		manifest:   manifest,
+		username:   c.username,
+		password:   c.password,
 	}
 }
 
@@ -170,6 +184,106 @@ func (c *registryClient) getAuthToken(ctx context.Context, registry, repository,
 	}
 
 	return token, nil
+}
+
+type registryStorage struct {
+	client     *registryClient
+	httpClient *http.Client
+	registry   string
+	repository string
+	manifest   *Manifest
+	username   string
+	password   string
+	authToken  string
+}
+
+func (s *registryStorage) ListBlobs(ctx context.Context) ([]BlobDescriptor, error) {
+	if s.manifest == nil {
+		return nil, fmt.Errorf("manifest not loaded for registry storage")
+	}
+
+	blobs := make([]BlobDescriptor, 0, len(s.manifest.Layers))
+	for _, layer := range s.manifest.Layers {
+		dgst, err := digest.Parse(layer.Digest)
+		if err != nil {
+			continue
+		}
+		blobs = append(blobs, BlobDescriptor{
+			Digest:    dgst,
+			Size:      layer.Size,
+			MediaType: layer.MediaType,
+		})
+	}
+	return blobs, nil
+}
+
+func (s *registryStorage) ReadBlob(ctx context.Context, blobDigest digest.Digest, offset int64, length int64) (io.ReadCloser, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("offset must be non-negative")
+	}
+
+	url := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", getScheme(s.registry), s.registry, s.repository, blobDigest.String())
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if length > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+	} else {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+
+	s.applyAuth(req)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		token, err := s.client.getAuthToken(ctx, s.registry, s.repository, wwwAuth)
+		if err != nil {
+			return nil, fmt.Errorf("auth failed: %w", err)
+		}
+		s.authToken = token
+
+		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		if length > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+		} else {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+		s.applyAuth(req)
+
+		resp, err = s.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("range request failed: %d %s", resp.StatusCode, string(body))
+	}
+
+	return resp.Body, nil
+}
+
+func (s *registryStorage) applyAuth(req *http.Request) {
+	if s.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.authToken)
+	}
+	if s.username != "" && s.password != "" {
+		req.SetBasicAuth(s.username, s.password)
+	}
 }
 
 func (c *registryClient) GetManifest(ctx context.Context, imageRef string) (*Manifest, error) {

@@ -60,6 +60,21 @@ func OpenFooter(sr *io.SectionReader) (tocOffset int64, footerSize int64, err er
 	return 0, 0, fmt.Errorf("failed to parse stargz footer")
 }
 
+// ParseFooter parses footer bytes and returns the TOC offset and footer size.
+func ParseFooter(data []byte) (int64, int64, error) {
+	if len(data) >= FooterSize {
+		if off, err := parseFooter(data[len(data)-FooterSize:], false); err == nil {
+			return off, FooterSize, nil
+		}
+	}
+	if len(data) >= legacyFooterSize {
+		if off, err := parseFooter(data[len(data)-legacyFooterSize:], true); err == nil {
+			return off, legacyFooterSize, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("failed to parse stargz footer bytes")
+}
+
 // ParseTOC parses the gzipped TOC tar section and returns the decoded TOC.
 func ParseTOC(data []byte) (*JTOC, error) {
 	gzReader, err := gzip.NewReader(bytes.NewReader(data))

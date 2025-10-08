@@ -97,65 +97,6 @@ func TestRegistryClient_WithCredential(t *testing.T) {
 	}
 }
 
-func TestImageAccessor_WithCredential(t *testing.T) {
-	client := NewRegistryClient()
-	manifest := &Manifest{
-		SchemaVersion: 2,
-		MediaType:     "application/vnd.oci.image.manifest.v1+json",
-		Layers: []Layer{
-			{
-				MediaType: "application/vnd.oci.image.layer.v1.tar+gzip",
-				Digest:    "sha256:abc123",
-				Size:      1000,
-			},
-		},
-	}
-
-	accessor := NewImageAccessor(client, "ghcr.io", "test/image", manifest)
-
-	tests := []struct {
-		name     string
-		username string
-		password string
-	}{
-		{
-			name:     "set credentials",
-			username: "testuser",
-			password: "testpass",
-		},
-		{
-			name:     "empty credentials",
-			username: "",
-			password: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			newAccessor := accessor.WithCredential(tt.username, tt.password)
-
-			ia, ok := newAccessor.(*imageAccessor)
-			if !ok {
-				t.Fatal("accessor is not *imageAccessor")
-			}
-
-			if ia.username != tt.username {
-				t.Errorf("username = %q, want %q", ia.username, tt.username)
-			}
-
-			if ia.password != tt.password {
-				t.Errorf("password = %q, want %q", ia.password, tt.password)
-			}
-
-			// Verify the original accessor is not modified
-			origIA, _ := accessor.(*imageAccessor)
-			if origIA.username != "" {
-				t.Error("original accessor should not have credentials")
-			}
-		})
-	}
-}
-
 func TestParseCredential(t *testing.T) {
 	tests := []struct {
 		name        string

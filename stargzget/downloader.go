@@ -64,14 +64,14 @@ type Downloader interface {
 }
 
 type downloader struct {
-	imageAccessor ImageAccessor
+	resolver ChunkResolver
 }
 
 const defaultSingleFileChunkThreshold int64 = 10 * 1024 * 1024 // 10MB
 
-func NewDownloader(imageAccessor ImageAccessor) Downloader {
+func NewDownloader(resolver ChunkResolver) Downloader {
 	return &downloader{
-		imageAccessor: imageAccessor,
+		resolver: resolver,
 	}
 }
 
@@ -242,7 +242,7 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, b
 	}
 	defer outFile.Close()
 
-	metadata, err := d.imageAccessor.GetFileMetadata(ctx, job.BlobDigest, job.Path)
+	metadata, err := d.resolver.FileMetadata(ctx, job.BlobDigest, job.Path)
 	if err != nil {
 		return stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
@@ -326,7 +326,7 @@ func (d *downloader) downloadFileChunks(
 					return
 				}
 
-				data, err := d.imageAccessor.ReadChunk(ctxChunk, job.Path, job.BlobDigest, chunk)
+				data, err := d.resolver.ReadChunk(ctxChunk, job.BlobDigest, job.Path, chunk)
 				if err != nil {
 					sendErr(stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
 					cancel()

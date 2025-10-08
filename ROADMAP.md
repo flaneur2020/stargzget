@@ -163,7 +163,7 @@
 - [x] Add `--verbose` flag for detailed logging (INFO level)
 - [x] Add `--debug` flag for developer debugging (DEBUG level)
 - [x] Log HTTP requests and responses in RegistryClient
-- [x] Log TOC download and parsing steps in ImageAccessor
+- [x] Log TOC download and parsing steps in ChunkResolver
 - [x] Log retry attempts with reasons in Downloader
 - [x] Redact sensitive info (auth tokens, passwords)
 - [x] **Validation**: Tested with real stargz images

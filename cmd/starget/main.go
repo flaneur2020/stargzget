@@ -162,17 +162,11 @@ func runLs(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Create image accessor
-	imageAccessor := stargzget.NewImageAccessor(registryClient, registry, repository, manifest)
+	storage := registryClient.NewStorage(registry, repository, manifest)
+	resolver := stargzget.NewChunkResolver(storage)
+	loader := stargzget.NewImageIndexLoader(storage, resolver)
 
-	// Apply credentials to image accessor if provided
-	if credential != "" {
-		username, password, _ := parseCredential(credential)
-		imageAccessor = imageAccessor.WithCredential(username, password)
-	}
-
-	// Get image index
-	index, err := imageAccessor.ImageIndex(context.Background())
+	index, err := loader.Load(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting image index: %v\n", err)
 		os.Exit(1)
@@ -266,16 +260,10 @@ func runGet(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Create image accessor and downloader
-	imageAccessor := stargzget.NewImageAccessor(registryClient, registry, repository, manifest)
-
-	// Apply credentials to image accessor if provided
-	if credential != "" {
-		username, password, _ := parseCredential(credential)
-		imageAccessor = imageAccessor.WithCredential(username, password)
-	}
-
-	downloader := stargzget.NewDownloader(imageAccessor)
+	storage := registryClient.NewStorage(registry, repository, manifest)
+	resolver := stargzget.NewChunkResolver(storage)
+	loader := stargzget.NewImageIndexLoader(storage, resolver)
+	downloader := stargzget.NewDownloader(resolver)
 
 	// Parse blob digest if provided
 	var dgst digest.Digest
@@ -290,7 +278,7 @@ func runGet(cmd *cobra.Command, args []string) {
 	// If blobDigest is empty, dgst will be zero value and FilterFiles will use all layers
 
 	// Get image index
-	index, err := imageAccessor.ImageIndex(ctx)
+	index, err := loader.Load(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting image index: %v\n", err)
 		os.Exit(1)

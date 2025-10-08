@@ -36,9 +36,11 @@ func TestIntegrationSingleFileChunkedDownload(t *testing.T) {
 
 	registry, repository := splitImageRef(t, imageRef)
 
-	accessor := stargzget.NewImageAccessor(client, registry, repository, manifest)
+	storage := client.NewStorage(registry, repository, manifest)
+	resolver := stargzget.NewChunkResolver(storage)
+	loader := stargzget.NewImageIndexLoader(storage, resolver)
 
-	index, err := accessor.ImageIndex(ctx)
+	index, err := loader.Load(ctx)
 	if err != nil {
 		t.Fatalf("ImageIndex() error = %v", err)
 	}
@@ -50,7 +52,7 @@ func TestIntegrationSingleFileChunkedDownload(t *testing.T) {
 		t.Fatalf("FindFile(%q) error = %v", targetPath, err)
 	}
 
-	targetMeta, err := accessor.GetFileMetadata(ctx, targetInfo.BlobDigest, targetInfo.Path)
+	targetMeta, err := resolver.FileMetadata(ctx, targetInfo.BlobDigest, targetInfo.Path)
 	if err != nil {
 		t.Fatalf("GetFileMetadata(%q) error = %v", targetPath, err)
 	}
@@ -74,7 +76,7 @@ func TestIntegrationSingleFileChunkedDownload(t *testing.T) {
 		SingleFileChunkThreshold: 1,
 	}
 
-	downloader := stargzget.NewDownloader(accessor)
+	downloader := stargzget.NewDownloader(resolver)
 	stats, err := downloader.StartDownload(ctx, []*stargzget.DownloadJob{job}, nil, opts)
 	if err != nil {
 		t.Fatalf("StartDownload() error = %v", err)

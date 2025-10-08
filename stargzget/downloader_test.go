@@ -10,21 +10,16 @@ import (
 	"testing"
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
+	"github.com/flaneur2020/stargz-get/stargzget/estargzutil"
 	"github.com/opencontainers/go-digest"
 )
 
-// mockImageAccessor is a mock implementation of ImageAccessor for testing
-type mockImageAccessor struct {
-	files     map[string][]byte // path -> file content
-	chunkSize int64             // optional chunk size for metadata
+type mockChunkResolver struct {
+	files     map[string][]byte
+	chunkSize int64
 }
 
-func (m *mockImageAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
-	// Not needed for downloader tests
-	return nil, nil
-}
-
-func (m *mockImageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
+func (m *mockChunkResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
 		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
@@ -53,13 +48,10 @@ func (m *mockImageAccessor) GetFileMetadata(ctx context.Context, blobDigest dige
 		chunks = append(chunks, Chunk{Offset: offset, Size: current})
 	}
 
-	return &FileMetadata{
-		Size:   size,
-		Chunks: chunks,
-	}, nil
+	return &FileMetadata{Size: size, Chunks: chunks}, nil
 }
 
-func (m *mockImageAccessor) ReadChunk(ctx context.Context, path string, blobDigest digest.Digest, chunk Chunk) ([]byte, error) {
+func (m *mockChunkResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
 	content, ok := m.files[path]
 	if !ok {
 		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
@@ -76,9 +68,8 @@ func (m *mockImageAccessor) ReadChunk(ctx context.Context, path string, blobDige
 	return buf, nil
 }
 
-func (m *mockImageAccessor) WithCredential(username, password string) ImageAccessor {
-	// Return self for testing
-	return m
+func (m *mockChunkResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
+	return &estargzutil.JTOC{}, nil
 }
 
 func TestDownloader_StartDownload(t *testing.T) {
@@ -89,8 +80,8 @@ func TestDownloader_StartDownload(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Setup mock accessor with test files
-	mockAccessor := &mockImageAccessor{
+	// Setup mock resolver with test files
+	mockResolver := &mockChunkResolver{
 		files: map[string][]byte{
 			"bin/echo": []byte("echo content"),
 			"bin/cat":  []byte("cat content"),
@@ -98,7 +89,7 @@ func TestDownloader_StartDownload(t *testing.T) {
 		},
 	}
 
-	downloader := NewDownloader(mockAccessor)
+	downloader := NewDownloader(mockResolver)
 
 	digest1 := digest.FromString("layer1")
 
@@ -167,12 +158,14 @@ func TestDownloader_StartDownload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Track progress callbacks
 			var progressCalls int
-			var lastCurrent, lastTotal int64
+			var lastTotal, maxCurrent int64
 
 			progressCallback := func(current, total int64) {
 				progressCalls++
-				lastCurrent = current
 				lastTotal = total
+				if current > maxCurrent {
+					maxCurrent = current
+				}
 			}
 
 			stats, err := downloader.StartDownload(context.Background(), tt.jobs, progressCallback, nil)
@@ -212,8 +205,8 @@ func TestDownloader_StartDownload(t *testing.T) {
 					t.Errorf("Progress total = %d, want %d", lastTotal, tt.wantBytes)
 				}
 
-				if lastCurrent != tt.wantBytes {
-					t.Errorf("Progress current = %d, want %d (should reach total)", lastCurrent, tt.wantBytes)
+				if maxCurrent != tt.wantBytes {
+					t.Errorf("Progress max current = %d, want %d (should reach total)", maxCurrent, tt.wantBytes)
 				}
 			}
 		})
@@ -224,14 +217,14 @@ func TestDownloader_SingleFileChunkedDownload(t *testing.T) {
 	tempDir := t.TempDir()
 
 	content := bytes.Repeat([]byte("chunk-data"), 64) // 640 bytes
-	mockAccessor := &mockImageAccessor{
+	mockResolver := &mockChunkResolver{
 		files: map[string][]byte{
 			"usr/bin/bash": content,
 		},
 		chunkSize: 128,
 	}
 
-	downloader := NewDownloader(mockAccessor)
+	downloader := NewDownloader(mockResolver)
 	job := &DownloadJob{
 		Path:       "usr/bin/bash",
 		BlobDigest: digest.FromString("blob"),
@@ -303,19 +296,14 @@ func TestDownloadJob_Creation(t *testing.T) {
 	}
 }
 
-// mockFailingAccessor simulates temporary failures
-type mockFailingAccessor struct {
+type mockFailingResolver struct {
 	files        map[string][]byte
-	failCount    map[string]int // path -> number of times to fail
-	attemptCount map[string]int // path -> current attempt count
-	mu           sync.Mutex     // protects attemptCount
+	failCount    map[string]int
+	attemptCount map[string]int
+	mu           sync.Mutex
 }
 
-func (m *mockFailingAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
-	return nil, nil
-}
-
-func (m *mockFailingAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
+func (m *mockFailingResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
 		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
@@ -327,13 +315,10 @@ func (m *mockFailingAccessor) GetFileMetadata(ctx context.Context, blobDigest di
 		chunks = append(chunks, Chunk{Offset: 0, Size: size})
 	}
 
-	return &FileMetadata{
-		Size:   size,
-		Chunks: chunks,
-	}, nil
+	return &FileMetadata{Size: size, Chunks: chunks}, nil
 }
 
-func (m *mockFailingAccessor) ReadChunk(ctx context.Context, path string, blobDigest digest.Digest, chunk Chunk) ([]byte, error) {
+func (m *mockFailingResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -365,9 +350,8 @@ func (m *mockFailingAccessor) ReadChunk(ctx context.Context, path string, blobDi
 	return buf, nil
 }
 
-func (m *mockFailingAccessor) WithCredential(username, password string) ImageAccessor {
-	// Return self for testing
-	return m
+func (m *mockFailingResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
+	return &estargzutil.JTOC{}, nil
 }
 
 func TestDownloader_StartDownload_WithRetries(t *testing.T) {
@@ -441,7 +425,7 @@ func TestDownloader_StartDownload_WithRetries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockAccessor := &mockFailingAccessor{
+			mockResolver := &mockFailingResolver{
 				files: map[string][]byte{
 					"file1": []byte("content1"),
 					"file2": []byte("content2"),
@@ -451,14 +435,14 @@ func TestDownloader_StartDownload_WithRetries(t *testing.T) {
 				attemptCount: make(map[string]int),
 			}
 
-			downloader := NewDownloader(mockAccessor)
+			downloader := NewDownloader(mockResolver)
 
 			var jobs []*DownloadJob
 			for path := range tt.failCount {
 				jobs = append(jobs, &DownloadJob{
 					Path:       path,
 					BlobDigest: digest.FromString("test"),
-					Size:       int64(len(mockAccessor.files[path])),
+					Size:       int64(len(mockResolver.files[path])),
 					OutputPath: filepath.Join(tempDir, tt.name, path),
 				})
 			}
@@ -496,7 +480,7 @@ func TestDownloader_Concurrency(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	// Create mock accessor with multiple files
-	mockAccessor := &mockImageAccessor{
+	mockResolver := &mockChunkResolver{
 		files: map[string][]byte{
 			"file1": []byte("content1"),
 			"file2": []byte("content2"),
@@ -509,7 +493,7 @@ func TestDownloader_Concurrency(t *testing.T) {
 		},
 	}
 
-	downloader := NewDownloader(mockAccessor)
+	downloader := NewDownloader(mockResolver)
 
 	// Create 8 download jobs
 	var jobs []*DownloadJob
@@ -609,8 +593,7 @@ func TestDownloader_ConcurrencyWithRetries(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create failing accessor where different files fail different times
-	mockAccessor := &mockFailingAccessor{
+	mockResolver := &mockFailingResolver{
 		files: map[string][]byte{
 			"file1": []byte("content1"),
 			"file2": []byte("content2"),
@@ -626,7 +609,7 @@ func TestDownloader_ConcurrencyWithRetries(t *testing.T) {
 		attemptCount: make(map[string]int),
 	}
 
-	downloader := NewDownloader(mockAccessor)
+	downloader := NewDownloader(mockResolver)
 
 	jobs := []*DownloadJob{
 		{Path: "file1", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file1")},
