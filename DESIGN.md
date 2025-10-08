@@ -113,7 +113,7 @@ type imageAccessor struct {
     registry       string
     repository     string
     manifest       *Manifest
-    tocCache       map[string]*jtoc          // Caches TOCs
+    tocCache       map[string]*estargzutil.JTOC  // Caches TOCs
     authToken      string
     index          *ImageIndex
 }

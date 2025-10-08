@@ -1,7 +1,6 @@
 package stargzget
 
 import (
-	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -188,25 +187,6 @@ type Chunk struct {
 	InnerOffset      int64 // Uncompressed offset within the gzip member to reach this chunk
 }
 
-type tocEntry struct {
-	Name          string            `json:"name"`
-	Type          string            `json:"type"`
-	Size          int64             `json:"size,omitempty"`
-	Offset        int64             `json:"offset,omitempty"`
-	ChunkOffset   int64             `json:"chunkOffset,omitempty"`
-	ChunkSize     int64             `json:"chunkSize,omitempty"`
-	InnerOffset   int64             `json:"innerOffset,omitempty"`
-	ChunkDigest   string            `json:"chunkDigest,omitempty"`
-	Annotations   map[string]string `json:"annotations,omitempty"`
-	nextOffset    int64
-	chunkTopIndex int
-}
-
-type jtoc struct {
-	Version int         `json:"version"`
-	Entries []*tocEntry `json:"entries"`
-}
-
 type imageAccessor struct {
 	httpClient     *http.Client
 	registryClient RegistryClient
@@ -214,7 +194,7 @@ type imageAccessor struct {
 	repository     string
 	manifest       *Manifest
 	// Cache: digest -> TOC
-	tocCache map[string]*jtoc
+	tocCache map[string]*estargzutil.JTOC
 	// Auth token cache
 	authToken string
 	// Cached index
@@ -231,7 +211,7 @@ func NewImageAccessor(registryClient RegistryClient, registry, repository string
 		registry:       registry,
 		repository:     repository,
 		manifest:       manifest,
-		tocCache:       make(map[string]*jtoc),
+		tocCache:       make(map[string]*estargzutil.JTOC),
 	}
 }
 
@@ -320,7 +300,7 @@ func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string
 }
 
 // downloadTOC downloads the stargz TOC.
-func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*jtoc, error) {
+func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*estargzutil.JTOC, error) {
 	// Check cache
 	if toc, ok := i.tocCache[blobDigest]; ok {
 		logger.Debug("TOC cache hit for blob: %s", blobDigest[:12])
@@ -371,44 +351,13 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*jt
 		return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
 
-	// The TOC section is gzipped tar, decompress and find stargz.index.json
-	gzReader, err := gzip.NewReader(bytes.NewReader(tocSection))
+	toc, err := estargzutil.ParseTOC(tocSection)
 	if err != nil {
 		return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 	}
-	defer gzReader.Close()
 
-	// Parse as tar and find stargz.index.json
-	tarReader := tar.NewReader(gzReader)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
-		}
-
-		// Look for stargz.index.json
-		if header.Name == estargzutil.TOCTarName {
-			tocJSONBytes, err := io.ReadAll(tarReader)
-			if err != nil {
-				return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
-			}
-
-			var toc jtoc
-			if err := json.Unmarshal(tocJSONBytes, &toc); err != nil {
-				return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
-			}
-
-			// Cache it
-			i.tocCache[blobDigest] = &toc
-
-			return &toc, nil
-		}
-	}
-
-	return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(fmt.Errorf("stargz.index.json not found in TOC section"))
+	i.tocCache[blobDigest] = toc
+	return toc, nil
 }
 
 // httpBlobReader implements io.ReaderAt for HTTP range requests
