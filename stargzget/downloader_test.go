@@ -2,12 +2,13 @@ package stargzget
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -18,61 +19,124 @@ import (
 )
 
 type mockBlobResolver struct {
-	files     map[string][]byte
-	chunkSize int64
+	metadata map[digest.Digest]map[string]*FileMetadata
+}
+
+func newMockBlobResolver() *mockBlobResolver {
+	return &mockBlobResolver{
+		metadata: make(map[digest.Digest]map[string]*FileMetadata),
+	}
+}
+
+func (m *mockBlobResolver) addFile(blob digest.Digest, path string, meta *FileMetadata) {
+	if _, ok := m.metadata[blob]; !ok {
+		m.metadata[blob] = make(map[string]*FileMetadata)
+	}
+	m.metadata[blob][path] = meta
 }
 
 func (m *mockBlobResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
-	content, ok := m.files[path]
+	files, ok := m.metadata[blobDigest]
 	if !ok {
-		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
+		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path).WithDetail("blobDigest", blobDigest.String())
 	}
-
-	size := int64(len(content))
-	if size == 0 {
-		return &FileMetadata{Size: 0, Chunks: []Chunk{}}, nil
-	}
-
-	chunkSize := m.chunkSize
-	if chunkSize <= 0 || chunkSize > size {
-		chunkSize = size
-	}
-
-	chunks := make([]Chunk, 0, (size+chunkSize-1)/chunkSize)
-	for offset := int64(0); offset < size; offset += chunkSize {
-		remaining := size - offset
-		current := chunkSize
-		if remaining < current {
-			current = remaining
-		}
-		if current <= 0 {
-			break
-		}
-		chunks = append(chunks, Chunk{Offset: offset, Size: current})
-	}
-
-	return &FileMetadata{Size: size, Chunks: chunks}, nil
-}
-
-func (m *mockBlobResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
-	content, ok := m.files[path]
+	meta, ok := files[path]
 	if !ok {
-		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
+		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path).WithDetail("blobDigest", blobDigest.String())
 	}
-
-	start := int(chunk.Offset)
-	end := start + int(chunk.Size)
-	if start < 0 || end > len(content) {
-		return nil, io.ErrUnexpectedEOF
-	}
-
-	buf := make([]byte, int(chunk.Size))
-	copy(buf, content[start:end])
-	return buf, nil
+	return meta, nil
 }
 
 func (m *mockBlobResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
 	return &estargzutil.JTOC{}, nil
+}
+
+func addFileToStorage(t *testing.T, store *storage.MockStorage, resolver *mockBlobResolver, path string, content []byte, chunkSize int64) digest.Digest {
+	t.Helper()
+
+	size := int64(len(content))
+	if size == 0 {
+		meta := &FileMetadata{Size: 0, Chunks: []Chunk{}}
+		dgst := store.AddBlob("application/vnd.test.empty", nil)
+		resolver.addFile(dgst, path, meta)
+		return dgst
+	}
+
+	if chunkSize <= 0 || chunkSize > size {
+		chunkSize = size
+	}
+
+	var compressed bytes.Buffer
+	chunks := make([]Chunk, 0, (size+chunkSize-1)/chunkSize)
+	var compressedOffset int64
+
+	for offset := int64(0); offset < size; offset += chunkSize {
+		end := offset + chunkSize
+		if end > size {
+			end = size
+		}
+		chunkBytes := content[offset:end]
+		compressedChunk := gzipCompress(t, chunkBytes)
+		if _, err := compressed.Write(compressedChunk); err != nil {
+			t.Fatalf("failed to build compressed blob: %v", err)
+		}
+
+		chunks = append(chunks, Chunk{
+			Offset:           offset,
+			Size:             end - offset,
+			CompressedOffset: compressedOffset,
+			InnerOffset:      0,
+		})
+		compressedOffset += int64(len(compressedChunk))
+	}
+
+	meta := &FileMetadata{
+		Size:   size,
+		Chunks: chunks,
+	}
+	dgst := store.AddBlob("application/vnd.test.gzip", compressed.Bytes())
+	resolver.addFile(dgst, path, meta)
+	return dgst
+}
+
+func gzipCompress(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(data); err != nil {
+		t.Fatalf("failed to gzip chunk: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("failed to finalize gzip chunk: %v", err)
+	}
+	return buf.Bytes()
+}
+
+type failingStorage struct {
+	base       *storage.MockStorage
+	failCounts map[digest.Digest]int
+	attempts   map[digest.Digest]int
+}
+
+func newFailingStorage(base *storage.MockStorage, failCounts map[digest.Digest]int) *failingStorage {
+	return &failingStorage{
+		base:       base,
+		failCounts: failCounts,
+		attempts:   make(map[digest.Digest]int),
+	}
+}
+
+func (m *failingStorage) ListBlobs(ctx context.Context) ([]storage.BlobDescriptor, error) {
+	return m.base.ListBlobs(ctx)
+}
+
+func (m *failingStorage) ReadBlob(ctx context.Context, dgst digest.Digest, offset int64, length int64) (io.ReadCloser, error) {
+	m.attempts[dgst]++
+	if failTimes, ok := m.failCounts[dgst]; ok && m.attempts[dgst] <= failTimes {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return m.base.ReadBlob(ctx, dgst, offset, length)
 }
 
 func TestDownloader_StartDownload(t *testing.T) {
@@ -83,18 +147,16 @@ func TestDownloader_StartDownload(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Setup mock resolver with test files
-	mockResolver := &mockBlobResolver{
-		files: map[string][]byte{
-			"bin/echo": []byte("echo content"),
-			"bin/cat":  []byte("cat content"),
-			"lib/libc": []byte("libc content"),
-		},
+	store := storage.NewMockStorage()
+	resolver := newMockBlobResolver()
+
+	fileDigests := map[string]digest.Digest{
+		"bin/echo": addFileToStorage(t, store, resolver, "bin/echo", []byte("echo content"), 0),
+		"bin/cat":  addFileToStorage(t, store, resolver, "bin/cat", []byte("cat content"), 0),
+		"lib/libc": addFileToStorage(t, store, resolver, "lib/libc", []byte("libc content"), 0),
 	}
 
-	downloader := NewDownloader(mockResolver, storage.NewMockStorage())
-
-	digest1 := digest.FromString("layer1")
+	downloader := NewDownloader(resolver, store)
 
 	tests := []struct {
 		name            string
@@ -108,7 +170,7 @@ func TestDownloader_StartDownload(t *testing.T) {
 			jobs: []*DownloadJob{
 				{
 					Path:       "bin/echo",
-					BlobDigest: digest1,
+					BlobDigest: fileDigests["bin/echo"],
 					Size:       12,
 					OutputPath: filepath.Join(tempDir, "test1", "echo"),
 				},
@@ -124,19 +186,19 @@ func TestDownloader_StartDownload(t *testing.T) {
 			jobs: []*DownloadJob{
 				{
 					Path:       "bin/echo",
-					BlobDigest: digest1,
+					BlobDigest: fileDigests["bin/echo"],
 					Size:       12,
 					OutputPath: filepath.Join(tempDir, "test2", "bin", "echo"),
 				},
 				{
 					Path:       "bin/cat",
-					BlobDigest: digest1,
+					BlobDigest: fileDigests["bin/cat"],
 					Size:       11,
 					OutputPath: filepath.Join(tempDir, "test2", "bin", "cat"),
 				},
 				{
 					Path:       "lib/libc",
-					BlobDigest: digest1,
+					BlobDigest: fileDigests["lib/libc"],
 					Size:       12,
 					OutputPath: filepath.Join(tempDir, "test2", "lib", "libc"),
 				},
@@ -220,18 +282,14 @@ func TestDownloader_SingleFileChunkedDownload(t *testing.T) {
 	tempDir := t.TempDir()
 
 	content := bytes.Repeat([]byte("chunk-data"), 64) // 640 bytes
-	mockResolver := &mockBlobResolver{
-		files: map[string][]byte{
-			"usr/bin/bash": content,
-		},
-		chunkSize: 128,
-	}
-	mockStorage := storage.NewMockStorage()
+	store := storage.NewMockStorage()
+	resolver := newMockBlobResolver()
+	dgst := addFileToStorage(t, store, resolver, "usr/bin/bash", content, 128)
 
-	downloader := NewDownloader(mockResolver, mockStorage)
+	downloader := NewDownloader(resolver, store)
 	job := &DownloadJob{
 		Path:       "usr/bin/bash",
-		BlobDigest: digest.FromString("blob"),
+		BlobDigest: dgst,
 		Size:       int64(len(content)),
 		OutputPath: filepath.Join(tempDir, "bash"),
 	}
@@ -298,64 +356,6 @@ func TestDownloadJob_Creation(t *testing.T) {
 	if job.OutputPath != "/tmp/echo" {
 		t.Errorf("Job output path = %s, want /tmp/echo", job.OutputPath)
 	}
-}
-
-type mockFailingBlobResolver struct {
-	files        map[string][]byte
-	failCount    map[string]int
-	attemptCount map[string]int
-	mu           sync.Mutex
-}
-
-func (m *mockFailingBlobResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
-	content, ok := m.files[path]
-	if !ok {
-		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
-	}
-
-	size := int64(len(content))
-	chunks := []Chunk{}
-	if size > 0 {
-		chunks = append(chunks, Chunk{Offset: 0, Size: size})
-	}
-
-	return &FileMetadata{Size: size, Chunks: chunks}, nil
-}
-
-func (m *mockFailingBlobResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.attemptCount == nil {
-		m.attemptCount = make(map[string]int)
-	}
-
-	m.attemptCount[path]++
-
-	if failTimes, exists := m.failCount[path]; exists {
-		if m.attemptCount[path] <= failTimes {
-			return nil, io.ErrUnexpectedEOF
-		}
-	}
-
-	content, ok := m.files[path]
-	if !ok {
-		return nil, io.EOF
-	}
-
-	start := int(chunk.Offset)
-	end := start + int(chunk.Size)
-	if start < 0 || end > len(content) {
-		return nil, io.ErrUnexpectedEOF
-	}
-
-	buf := make([]byte, int(chunk.Size))
-	copy(buf, content[start:end])
-	return buf, nil
-}
-
-func (m *mockFailingBlobResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
-	return &estargzutil.JTOC{}, nil
 }
 
 func TestDownloader_StartDownload_WithRetries(t *testing.T) {
@@ -429,25 +429,41 @@ func TestDownloader_StartDownload_WithRetries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockResolver := &mockFailingBlobResolver{
-				files: map[string][]byte{
-					"file1": []byte("content1"),
-					"file2": []byte("content2"),
-					"file3": []byte("content3"),
-				},
-				failCount:    tt.failCount,
-				attemptCount: make(map[string]int),
-			}
-			mockStorage := storage.NewMockStorage()
+			store := storage.NewMockStorage()
+			resolver := newMockBlobResolver()
 
-			downloader := NewDownloader(mockResolver, mockStorage)
+			fileContents := map[string][]byte{
+				"file1": []byte("content1"),
+				"file2": []byte("content2"),
+				"file3": []byte("content3"),
+			}
+
+			digestByPath := make(map[string]digest.Digest, len(fileContents))
+			for path, data := range fileContents {
+				digestByPath[path] = addFileToStorage(t, store, resolver, path, data, 0)
+			}
+
+			failCounts := make(map[digest.Digest]int, len(tt.failCount))
+			for path, failures := range tt.failCount {
+				failCounts[digestByPath[path]] = failures
+			}
+
+			storageWithFailures := newFailingStorage(store, failCounts)
+			downloader := NewDownloader(resolver, storageWithFailures)
+
+			keys := make([]string, 0, len(tt.failCount))
+			for path := range tt.failCount {
+				keys = append(keys, path)
+			}
+			sort.Strings(keys)
 
 			var jobs []*DownloadJob
-			for path := range tt.failCount {
+			for _, path := range keys {
+				data := fileContents[path]
 				jobs = append(jobs, &DownloadJob{
 					Path:       path,
-					BlobDigest: digest.FromString("test"),
-					Size:       int64(len(mockResolver.files[path])),
+					BlobDigest: digestByPath[path],
+					Size:       int64(len(data)),
 					OutputPath: filepath.Join(tempDir, tt.name, path),
 				})
 			}
@@ -484,30 +500,23 @@ func TestDownloader_Concurrency(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create mock accessor with multiple files
-	mockResolver := &mockBlobResolver{
-		files: map[string][]byte{
-			"file1": []byte("content1"),
-			"file2": []byte("content2"),
-			"file3": []byte("content3"),
-			"file4": []byte("content4"),
-			"file5": []byte("content5"),
-			"file6": []byte("content6"),
-			"file7": []byte("content7"),
-			"file8": []byte("content8"),
-		},
+	store := storage.NewMockStorage()
+	resolver := newMockBlobResolver()
+
+	paths := []string{"file1", "file2", "file3", "file4", "file5", "file6", "file7", "file8"}
+	digestByPath := make(map[string]digest.Digest, len(paths))
+	for _, path := range paths {
+		content := []byte("content" + string(path[len(path)-1]))
+		digestByPath[path] = addFileToStorage(t, store, resolver, path, content, 0)
 	}
-	mockStorage := storage.NewMockStorage()
 
-	downloader := NewDownloader(mockResolver, mockStorage)
+	downloader := NewDownloader(resolver, store)
 
-	// Create 8 download jobs
-	var jobs []*DownloadJob
-	for i := 1; i <= 8; i++ {
-		path := "file" + string(rune('0'+i))
+	jobs := make([]*DownloadJob, 0, len(paths))
+	for _, path := range paths {
 		jobs = append(jobs, &DownloadJob{
 			Path:       path,
-			BlobDigest: digest.FromString("test"),
+			BlobDigest: digestByPath[path],
 			Size:       8,
 			OutputPath: filepath.Join(tempDir, path),
 		})
@@ -599,30 +608,33 @@ func TestDownloader_ConcurrencyWithRetries(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	mockResolver := &mockFailingBlobResolver{
-		files: map[string][]byte{
-			"file1": []byte("content1"),
-			"file2": []byte("content2"),
-			"file3": []byte("content3"),
-			"file4": []byte("content4"),
-		},
-		failCount: map[string]int{
-			"file1": 0, // succeed immediately
-			"file2": 1, // fail once
-			"file3": 2, // fail twice
-			"file4": 3, // fail three times (will ultimately fail with maxRetries=2)
-		},
-		attemptCount: make(map[string]int),
-	}
-	mockStorage := storage.NewMockStorage()
+	store := storage.NewMockStorage()
+	resolver := newMockBlobResolver()
 
-	downloader := NewDownloader(mockResolver, mockStorage)
+	failByPath := map[string]int{
+		"file1": 0, // succeed immediately
+		"file2": 1, // fail once
+		"file3": 2, // fail twice
+		"file4": 3, // fail three times (will ultimately fail with maxRetries=2)
+	}
+	digestByPath := make(map[string]digest.Digest, len(failByPath))
+	for path := range failByPath {
+		content := []byte("content" + string(path[len(path)-1]))
+		digestByPath[path] = addFileToStorage(t, store, resolver, path, content, 0)
+	}
+
+	failCounts := make(map[digest.Digest]int, len(failByPath))
+	for path, count := range failByPath {
+		failCounts[digestByPath[path]] = count
+	}
+
+	downloader := NewDownloader(resolver, newFailingStorage(store, failCounts))
 
 	jobs := []*DownloadJob{
-		{Path: "file1", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file1")},
-		{Path: "file2", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file2")},
-		{Path: "file3", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file3")},
-		{Path: "file4", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file4")},
+		{Path: "file1", BlobDigest: digestByPath["file1"], Size: 8, OutputPath: filepath.Join(tempDir, "file1")},
+		{Path: "file2", BlobDigest: digestByPath["file2"], Size: 8, OutputPath: filepath.Join(tempDir, "file2")},
+		{Path: "file3", BlobDigest: digestByPath["file3"], Size: 8, OutputPath: filepath.Join(tempDir, "file3")},
+		{Path: "file4", BlobDigest: digestByPath["file4"], Size: 8, OutputPath: filepath.Join(tempDir, "file4")},
 	}
 
 	opts := &DownloadOptions{

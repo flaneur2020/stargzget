@@ -388,32 +388,32 @@ chunkLoop:
 	return nil
 }
 
-func (r *downloader) readChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
-	reader, err := r.storage.ReadBlob(ctx, blobDigest, chunk.CompressedOffset, 0)
+func (d *downloader) readChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
+	reader, err := d.storage.ReadBlob(ctx, blobDigest, chunk.CompressedOffset, 0)
 	if err != nil {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+		return nil, stargzerrors.ErrDownloadFailed.WithDetail("path", path).WithCause(err)
 	}
 	defer reader.Close()
 
 	gz, err := gzip.NewReader(reader)
 	if err != nil {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+		return nil, stargzerrors.ErrDownloadFailed.WithDetail("path", path).WithCause(err)
 	}
 	defer gz.Close()
 
 	if chunk.InnerOffset > 0 {
 		if _, err := io.CopyN(io.Discard, gz, chunk.InnerOffset); err != nil {
-			return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+			return nil, stargzerrors.ErrDownloadFailed.WithDetail("path", path).WithCause(err)
 		}
 	}
 
 	buf := make([]byte, chunk.Size)
 	n, err := io.ReadFull(gz, buf)
 	if err != nil && err != io.EOF {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+		return nil, stargzerrors.ErrDownloadFailed.WithDetail("path", path).WithCause(err)
 	}
 	if int64(n) != chunk.Size {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(io.ErrUnexpectedEOF)
+		return nil, stargzerrors.ErrDownloadFailed.WithDetail("path", path).WithCause(io.ErrUnexpectedEOF)
 	}
 
 	return buf, nil

@@ -154,7 +154,7 @@ type FileInfo struct {
 2. For each job:
    - Try download with retry loop
    - Create output directory if needed
-  - Downloader uses BlobResolver + Storage to stream file chunks
+  - Downloader uses BlobResolver for metadata and streams chunk bytes directly from Storage
    - Copy content with progress tracking
    - Retry on failure (up to MaxRetries)
 3. Return statistics (success/failed/retries)
@@ -257,8 +257,7 @@ CLI → Downloader: StartDownload(jobs, progress, opts)
   ↓
 Downloader (for each job):
   ├─→ BlobResolver: FileMetadata(path, blob)
-  ├─→ BlobResolver: ReadChunk(blob, offset)
-  │   └─→ Storage: Range request + chunk decompression
+  ├─→ Storage: Range request + gzip chunk decompression
   ├─→ Write to output file
   └─→ Update progress
   ↓
