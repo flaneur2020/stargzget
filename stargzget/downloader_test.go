@@ -13,7 +13,7 @@ import (
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/flaneur2020/stargz-get/stargzget/estargzutil"
-	stor "github.com/flaneur2020/stargz-get/stargzget/storage"
+	"github.com/flaneur2020/stargz-get/stargzget/storage"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -92,7 +92,7 @@ func TestDownloader_StartDownload(t *testing.T) {
 		},
 	}
 
-	downloader := NewDownloader(mockResolver)
+	downloader := NewDownloader(mockResolver, storage.NewMockStorage())
 
 	digest1 := digest.FromString("layer1")
 
@@ -226,8 +226,9 @@ func TestDownloader_SingleFileChunkedDownload(t *testing.T) {
 		},
 		chunkSize: 128,
 	}
+	mockStorage := storage.NewMockStorage()
 
-	downloader := NewDownloader(mockResolver)
+	downloader := NewDownloader(mockResolver, mockStorage)
 	job := &DownloadJob{
 		Path:       "usr/bin/bash",
 		BlobDigest: digest.FromString("blob"),
@@ -437,8 +438,9 @@ func TestDownloader_StartDownload_WithRetries(t *testing.T) {
 				failCount:    tt.failCount,
 				attemptCount: make(map[string]int),
 			}
+			mockStorage := storage.NewMockStorage()
 
-			downloader := NewDownloader(mockResolver)
+			downloader := NewDownloader(mockResolver, mockStorage)
 
 			var jobs []*DownloadJob
 			for path := range tt.failCount {
@@ -495,8 +497,9 @@ func TestDownloader_Concurrency(t *testing.T) {
 			"file8": []byte("content8"),
 		},
 	}
+	mockStorage := storage.NewMockStorage()
 
-	downloader := NewDownloader(mockResolver)
+	downloader := NewDownloader(mockResolver, mockStorage)
 
 	// Create 8 download jobs
 	var jobs []*DownloadJob
@@ -584,7 +587,7 @@ func TestDownloader_Concurrency(t *testing.T) {
 
 			// Clean up files for next test
 			os.RemoveAll(tempDir)
-			os.MkdirAll(tempDir, 0755)
+			os.MkdirAll(tempDir, 0o755)
 		})
 	}
 }
@@ -611,8 +614,9 @@ func TestDownloader_ConcurrencyWithRetries(t *testing.T) {
 		},
 		attemptCount: make(map[string]int),
 	}
+	mockStorage := storage.NewMockStorage()
 
-	downloader := NewDownloader(mockResolver)
+	downloader := NewDownloader(mockResolver, mockStorage)
 
 	jobs := []*DownloadJob{
 		{Path: "file1", BlobDigest: digest.FromString("test"), Size: 8, OutputPath: filepath.Join(tempDir, "file1")},
@@ -661,7 +665,7 @@ func TestIntegrationSingleFileChunkedDownload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	client := stor.NewRemoteRegistryStorage()
+	client := storage.NewRemoteRegistryStorage()
 	manifest, err := client.GetManifest(ctx, imageRef)
 	if err != nil {
 		t.Fatalf("GetManifest(%q) error = %v", imageRef, err)
@@ -706,7 +710,7 @@ func TestIntegrationSingleFileChunkedDownload(t *testing.T) {
 		SingleFileChunkThreshold: 1,
 	}
 
-	downloader := NewDownloader(resolver)
+	downloader := NewDownloader(resolver, storage)
 	stats, err := downloader.StartDownload(ctx, []*DownloadJob{job}, nil, opts)
 	if err != nil {
 		t.Fatalf("StartDownload() error = %v", err)

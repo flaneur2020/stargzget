@@ -2,7 +2,6 @@ package stargzget
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"io"
 	"testing"
@@ -65,32 +64,6 @@ func TestBlobResolver_FileMetadata(t *testing.T) {
 	ch := meta.Chunks[0]
 	if ch.Offset != 0 || ch.Size != 5 {
 		t.Fatalf("Chunk = %+v, want offset 0 size 5", ch)
-	}
-}
-
-func TestBlobResolver_ReadChunk(t *testing.T) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	_, _ = gz.Write([]byte("hello"))
-	gz.Close()
-
-	storage := &stubStorage{data: buf.Bytes()}
-	resolver := &blobResolver{storage: storage}
-
-	chunk := Chunk{
-		Offset:           0,
-		Size:             5,
-		CompressedOffset: 0,
-		InnerOffset:      0,
-	}
-
-	data, err := resolver.ReadChunk(context.Background(), digest.FromString("blob"), "usr/bin/bash", chunk)
-	if err != nil {
-		t.Fatalf("ReadChunk() error = %v", err)
-	}
-
-	if string(data) != "hello" {
-		t.Fatalf("ReadChunk() = %q, want %q", string(data), "hello")
 	}
 }
 

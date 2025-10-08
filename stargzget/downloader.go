@@ -1,6 +1,7 @@
 package stargzget
 
 import (
+	"compress/gzip"
 	"context"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/flaneur2020/stargz-get/stargzget/logger"
+	"github.com/flaneur2020/stargz-get/stargzget/storage"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -65,13 +67,15 @@ type Downloader interface {
 
 type downloader struct {
 	resolver BlobResolver
+	storage  storage.Storage
 }
 
 const defaultSingleFileChunkThreshold int64 = 10 * 1024 * 1024 // 10MB
 
-func NewDownloader(resolver BlobResolver) Downloader {
+func NewDownloader(resolver BlobResolver, storage storage.Storage) Downloader {
 	return &downloader{
 		resolver: resolver,
+		storage:  storage,
 	}
 }
 
@@ -326,7 +330,7 @@ func (d *downloader) downloadFileChunks(
 					return
 				}
 
-				data, err := d.resolver.ReadChunk(ctxChunk, job.BlobDigest, job.Path, chunk)
+				data, err := d.readChunk(ctxChunk, job.BlobDigest, job.Path, chunk)
 				if err != nil {
 					sendErr(stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
 					cancel()
@@ -382,4 +386,35 @@ chunkLoop:
 	}
 
 	return nil
+}
+
+func (r *downloader) readChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
+	reader, err := r.storage.ReadBlob(ctx, blobDigest, chunk.CompressedOffset, 0)
+	if err != nil {
+		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+	}
+	defer reader.Close()
+
+	gz, err := gzip.NewReader(reader)
+	if err != nil {
+		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+	}
+	defer gz.Close()
+
+	if chunk.InnerOffset > 0 {
+		if _, err := io.CopyN(io.Discard, gz, chunk.InnerOffset); err != nil {
+			return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+		}
+	}
+
+	buf := make([]byte, chunk.Size)
+	n, err := io.ReadFull(gz, buf)
+	if err != nil && err != io.EOF {
+		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
+	}
+	if int64(n) != chunk.Size {
+		return nil, stargzerrors.ErrDownloadFailed.WithCause(io.ErrUnexpectedEOF)
+	}
+
+	return buf, nil
 }

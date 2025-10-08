@@ -1,7 +1,6 @@
 package stargzget
 
 import (
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -16,7 +15,6 @@ import (
 // BlobResolver resolves file metadata and chunk contents using Storage.
 type BlobResolver interface {
 	FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error)
-	ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error)
 	TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error)
 }
 
@@ -74,37 +72,6 @@ func (r *blobResolver) FileMetadata(ctx context.Context, blobDigest digest.Diges
 	}
 
 	return result, nil
-}
-
-func (r *blobResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
-	reader, err := r.storage.ReadBlob(ctx, blobDigest, chunk.CompressedOffset, 0)
-	if err != nil {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
-	}
-	defer reader.Close()
-
-	gz, err := gzip.NewReader(reader)
-	if err != nil {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
-	}
-	defer gz.Close()
-
-	if chunk.InnerOffset > 0 {
-		if _, err := io.CopyN(io.Discard, gz, chunk.InnerOffset); err != nil {
-			return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
-		}
-	}
-
-	buf := make([]byte, chunk.Size)
-	n, err := io.ReadFull(gz, buf)
-	if err != nil && err != io.EOF {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
-	}
-	if int64(n) != chunk.Size {
-		return nil, stargzerrors.ErrDownloadFailed.WithCause(io.ErrUnexpectedEOF)
-	}
-
-	return buf, nil
 }
 
 func (r *blobResolver) loadTOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {

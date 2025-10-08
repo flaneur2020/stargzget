@@ -264,7 +264,7 @@ func runGet(cmd *cobra.Command, args []string) {
 	storage := registryClient.NewStorage(registry, repository, manifest)
 	resolver := stargzget.NewBlobResolver(storage)
 	loader := stargzget.NewBlobIndexLoader(storage, resolver)
-	downloader := stargzget.NewDownloader(resolver)
+	downloader := stargzget.NewDownloader(resolver, storage)
 
 	// Parse blob digest if provided
 	var dgst digest.Digest
