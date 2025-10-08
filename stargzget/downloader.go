@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/flaneur2020/stargz-get/stargzget/logger"
 	"github.com/opencontainers/go-digest"
 )
@@ -231,23 +232,23 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, b
 	// Create target directory if needed
 	targetDir := filepath.Dir(job.OutputPath)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+		return stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
 	// Create target file
 	outFile, err := os.Create(job.OutputPath)
 	if err != nil {
-		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+		return stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 	defer outFile.Close()
 
 	metadata, err := d.imageAccessor.GetFileMetadata(ctx, job.BlobDigest, job.Path)
 	if err != nil {
-		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+		return stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
 	if metadata == nil {
-		return ErrDownloadFailed.WithDetail("path", job.Path).WithMessage("missing file metadata")
+		return stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithMessage("missing file metadata")
 	}
 
 	if len(metadata.Chunks) == 0 {
@@ -327,19 +328,19 @@ func (d *downloader) downloadFileChunks(
 
 				data, err := d.imageAccessor.ReadChunk(ctxChunk, job.Path, job.BlobDigest, chunk)
 				if err != nil {
-					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
+					sendErr(stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
 					cancel()
 					return
 				}
 
 				if int64(len(data)) != chunk.Size {
-					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(io.ErrUnexpectedEOF))
+					sendErr(stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(io.ErrUnexpectedEOF))
 					cancel()
 					return
 				}
 
 				if _, err := outFile.WriteAt(data, chunk.Offset); err != nil {
-					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
+					sendErr(stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
 					cancel()
 					return
 				}
@@ -376,7 +377,7 @@ chunkLoop:
 
 	if metadata.Size >= 0 {
 		if err := outFile.Truncate(metadata.Size); err != nil {
-			return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+			return stargzerrors.ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 		}
 	}
 

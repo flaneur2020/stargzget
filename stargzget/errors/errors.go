@@ -1,8 +1,6 @@
-package stargzget
+package errors
 
-import (
-	"fmt"
-)
+import "fmt"
 
 // Error types for stargz-get operations
 var (
@@ -30,9 +28,9 @@ var (
 
 // StargzError represents a structured error in stargz-get operations
 type StargzError struct {
-	Code    string // Error code for programmatic handling
-	Message string // Human-readable error message
-	Cause   error  // Underlying error, if any
+	Code    string                 // Error code for programmatic handling
+	Message string                 // Human-readable error message
+	Cause   error                  // Underlying error, if any
 	Details map[string]interface{} // Additional context
 }
 

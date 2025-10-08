@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -26,7 +27,7 @@ func (m *mockImageAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error)
 func (m *mockImageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
-		return nil, ErrFileNotFound.WithDetail("path", path)
+		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
 	}
 
 	size := int64(len(content))
@@ -61,7 +62,7 @@ func (m *mockImageAccessor) GetFileMetadata(ctx context.Context, blobDigest dige
 func (m *mockImageAccessor) ReadChunk(ctx context.Context, path string, blobDigest digest.Digest, chunk Chunk) ([]byte, error) {
 	content, ok := m.files[path]
 	if !ok {
-		return nil, ErrFileNotFound.WithDetail("path", path)
+		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
 	}
 
 	start := int(chunk.Offset)
@@ -317,7 +318,7 @@ func (m *mockFailingAccessor) ImageIndex(ctx context.Context) (*ImageIndex, erro
 func (m *mockFailingAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
-		return nil, ErrFileNotFound.WithDetail("path", path)
+		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
 	}
 
 	size := int64(len(content))

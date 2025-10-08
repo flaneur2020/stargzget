@@ -1,7 +1,7 @@
-package stargzget
+package errors
 
 import (
-	"errors"
+	stderrs "errors"
 	"strings"
 	"testing"
 
@@ -27,7 +27,7 @@ func TestStargzError_Error(t *testing.T) {
 			err: &StargzError{
 				Code:    "TEST_ERROR",
 				Message: "test message",
-				Cause:   errors.New("underlying error"),
+				Cause:   stderrs.New("underlying error"),
 			},
 			wantStr: "[TEST_ERROR] test message: underlying error",
 		},
@@ -38,14 +38,13 @@ func TestStargzError_Error(t *testing.T) {
 				Message: "test message",
 				Details: map[string]interface{}{"key": "value"},
 			},
-			wantStr: "details",
+			wantStr: "[TEST_ERROR] test message (details: map[key:value])",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.err.Error()
-			if !strings.Contains(got, tt.wantStr) {
+			if got := tt.err.Error(); !strings.Contains(got, tt.wantStr) {
 				t.Errorf("Error() = %q, want to contain %q", got, tt.wantStr)
 			}
 		})
@@ -53,21 +52,20 @@ func TestStargzError_Error(t *testing.T) {
 }
 
 func TestStargzError_WithCause(t *testing.T) {
-	cause := errors.New("root cause")
+	cause := stderrs.New("underlying error")
 	err := ErrBlobNotFound.WithCause(cause)
 
 	if err.Cause != cause {
 		t.Errorf("WithCause() cause = %v, want %v", err.Cause, cause)
 	}
 
-	if !errors.Is(err, cause) {
+	if !stderrs.Is(err, cause) {
 		t.Error("WithCause() should allow errors.Is to work")
 	}
 }
 
 func TestStargzError_WithDetail(t *testing.T) {
 	err := ErrFileNotFound.WithDetail("path", "/bin/echo")
-
 	if err.Details["path"] != "/bin/echo" {
 		t.Errorf("WithDetail() path = %v, want /bin/echo", err.Details["path"])
 	}
@@ -75,14 +73,13 @@ func TestStargzError_WithDetail(t *testing.T) {
 
 func TestStargzError_WithMessage(t *testing.T) {
 	err := ErrBlobNotFound.WithMessage("custom message")
-
 	if err.Message != "custom message" {
 		t.Errorf("WithMessage() message = %q, want 'custom message'", err.Message)
 	}
 }
 
 func TestBlobNotFoundError_WithDetail(t *testing.T) {
-	dgst := digest.FromString("test-blob")
+	dgst := digest.FromString("test-digest")
 	err := ErrBlobNotFound.WithDetail("blobDigest", dgst.String())
 
 	if err.Code != "BLOB_NOT_FOUND" {
@@ -95,7 +92,7 @@ func TestBlobNotFoundError_WithDetail(t *testing.T) {
 }
 
 func TestFileNotFoundError_WithDetail(t *testing.T) {
-	dgst := digest.FromString("test-blob")
+	dgst := digest.FromString("test-digest")
 	err := ErrFileNotFound.WithDetail("path", "/bin/echo").WithDetail("blobDigest", dgst.String())
 
 	if err.Details["path"] != "/bin/echo" {
@@ -114,13 +111,13 @@ func TestFileNotFoundError_WithoutDigest(t *testing.T) {
 		t.Errorf("path detail = %v, want /bin/echo", err.Details["path"])
 	}
 
-	if _, exists := err.Details["blobDigest"]; exists {
+	if _, ok := err.Details["blobDigest"]; ok {
 		t.Error("blobDigest should not be in details when not added")
 	}
 }
 
 func TestManifestFetchError_WithDetail(t *testing.T) {
-	cause := errors.New("network error")
+	cause := stderrs.New("underlying error")
 	err := ErrManifestFetch.WithDetail("imageRef", "ghcr.io/test/image:latest").WithCause(cause)
 
 	if err.Code != "MANIFEST_FETCH_FAILED" {
@@ -133,11 +130,15 @@ func TestManifestFetchError_WithDetail(t *testing.T) {
 }
 
 func TestDownloadError_WithDetail(t *testing.T) {
-	cause := errors.New("io error")
+	cause := stderrs.New("network error")
 	err := ErrDownloadFailed.WithDetail("path", "/bin/echo").WithDetail("attempts", 3).WithCause(cause)
 
 	if err.Details["attempts"] != 3 {
 		t.Errorf("attempts detail = %v, want 3", err.Details["attempts"])
+	}
+
+	if err.Cause != cause {
+		t.Errorf("Cause = %v, want %v", err.Cause, cause)
 	}
 }
 
@@ -154,12 +155,17 @@ func TestIsStargzError(t *testing.T) {
 		},
 		{
 			name: "StargzError with cause",
-			err:  ErrBlobNotFound.WithCause(errors.New("test")),
+			err:  ErrBlobNotFound.WithCause(stderrs.New("test")),
 			want: true,
 		},
 		{
-			name: "standard error",
-			err:  errors.New("test"),
+			name: "non-StargzError",
+			err:  stderrs.New("test"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
 			want: false,
 		},
 	}
@@ -190,8 +196,13 @@ func TestGetErrorCode(t *testing.T) {
 			want: "BLOB_NOT_FOUND",
 		},
 		{
-			name: "standard error",
-			err:  errors.New("test"),
+			name: "non-StargzError",
+			err:  stderrs.New("test"),
+			want: "",
+		},
+		{
+			name: "nil error",
+			err:  nil,
 			want: "",
 		},
 	}
