@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 )
 
 const TOCTarName = "stargz.index.json"
@@ -15,6 +16,12 @@ const TOCTarName = "stargz.index.json"
 type JTOC struct {
 	Version int         `json:"version"`
 	Entries []*TOCEntry `json:"entries"`
+}
+
+// FileEntry aggregates metadata for a regular file listed in the TOC.
+type FileEntry struct {
+	Size   int64
+	Chunks []Chunk
 }
 
 // TOCEntry represents a single entry in the TOC.
@@ -70,4 +77,100 @@ func ReadTOC(r io.Reader) (*JTOC, error) {
 // ParseTOC parses the gzipped TOC tar section and returns the decoded TOC.
 func ParseTOC(data []byte) (*JTOC, error) {
 	return ReadTOC(bytes.NewReader(data))
+}
+
+// FileEntries returns a map of file name to aggregated chunk metadata for each file.
+func (toc *JTOC) FileEntries() map[string]FileEntry {
+	files := make(map[string]FileEntry)
+	if toc == nil || len(toc.Entries) == 0 {
+		return files
+	}
+
+	type fileBuilder struct {
+		size   int64
+		chunks []Chunk
+	}
+
+	builders := make(map[string]*fileBuilder)
+
+	for _, entry := range toc.Entries {
+		if entry == nil {
+			continue
+		}
+		if entry.Type != "reg" && entry.Type != "chunk" {
+			continue
+		}
+
+		builder := builders[entry.Name]
+		if builder == nil {
+			builder = &fileBuilder{}
+			builders[entry.Name] = builder
+		}
+
+		if entry.Size > builder.size {
+			builder.size = entry.Size
+		}
+
+		chunkSize := entry.ChunkSize
+		if entry.Type == "reg" && chunkSize == 0 && entry.Size != 0 {
+			chunkSize = entry.Size
+		}
+
+		ch := Chunk{
+			Offset:           entry.ChunkOffset,
+			Size:             chunkSize,
+			CompressedOffset: entry.Offset,
+			InnerOffset:      entry.InnerOffset,
+		}
+
+		builder.chunks = append(builder.chunks, ch)
+
+		if chunkSize > 0 {
+			if end := entry.ChunkOffset + chunkSize; end > builder.size {
+				builder.size = end
+			}
+		}
+	}
+
+	for name, builder := range builders {
+		if len(builder.chunks) == 0 {
+			continue
+		}
+
+		sorted := append([]Chunk(nil), builder.chunks...)
+		sort.Slice(sorted, func(i, j int) bool {
+			if sorted[i].Offset == sorted[j].Offset {
+				return sorted[i].InnerOffset < sorted[j].InnerOffset
+			}
+			return sorted[i].Offset < sorted[j].Offset
+		})
+
+		fileSize := builder.size
+		for idx := range sorted {
+			if sorted[idx].Size == 0 {
+				nextOffset := fileSize
+				if idx+1 < len(sorted) {
+					nextOffset = sorted[idx+1].Offset
+				}
+				chunkSize := nextOffset - sorted[idx].Offset
+				if chunkSize <= 0 {
+					chunkSize = fileSize - sorted[idx].Offset
+				}
+				if chunkSize < 0 {
+					chunkSize = 0
+				}
+				sorted[idx].Size = chunkSize
+			}
+			if end := sorted[idx].Offset + sorted[idx].Size; end > fileSize {
+				fileSize = end
+			}
+		}
+
+		files[name] = FileEntry{
+			Size:   fileSize,
+			Chunks: sorted,
+		}
+	}
+
+	return files
 }
