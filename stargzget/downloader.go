@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/flaneur2020/stargz-get/logger"
 	"github.com/opencontainers/go-digest"
@@ -42,9 +43,10 @@ type DownloadStats struct {
 
 // DownloadOptions configures download behavior
 type DownloadOptions struct {
-	MaxRetries  int            // Maximum number of retries per file (default: 3)
-	Concurrency int            // Number of concurrent workers (default: 4, set to 1 for sequential)
-	OnStatus    StatusCallback // Optional callback for status updates (file started/completed)
+	MaxRetries               int            // Maximum number of retries per file (default: 3)
+	Concurrency              int            // Number of concurrent workers (default: 4, set to 1 for sequential)
+	OnStatus                 StatusCallback // Optional callback for status updates (file started/completed)
+	SingleFileChunkThreshold int64          // Files >= this size (bytes) may use chunked download (default: 10MB)
 }
 
 // jobWithOffset associates a download job with its base offset in the
@@ -63,6 +65,8 @@ type Downloader interface {
 type downloader struct {
 	imageAccessor ImageAccessor
 }
+
+const defaultSingleFileChunkThreshold int64 = 10 * 1024 * 1024 // 10MB
 
 func NewDownloader(imageAccessor ImageAccessor) Downloader {
 	return &downloader{
@@ -91,6 +95,10 @@ func (d *downloader) StartDownload(ctx context.Context, jobs []*DownloadJob, pro
 	// Set default max retries if not specified
 	if opts.MaxRetries <= 0 {
 		opts.MaxRetries = 3
+	}
+
+	if opts.SingleFileChunkThreshold <= 0 {
+		opts.SingleFileChunkThreshold = defaultSingleFileChunkThreshold
 	}
 
 	// Calculate total size
@@ -182,7 +190,7 @@ func (d *downloader) processDownloadJob(
 			mu.Unlock()
 		}
 
-		err := d.downloadSingleFile(ctx, jwo.job, jwo.baseOffset, totalSize, progress, mu)
+		err := d.downloadSingleFile(ctx, jwo.job, jwo.baseOffset, totalSize, progress, mu, opts)
 		if err == nil {
 			downloaded = true
 			mu.Lock()
@@ -219,7 +227,7 @@ func (d *downloader) processDownloadJob(
 }
 
 // downloadSingleFile downloads a single file
-func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, baseOffset int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex) error {
+func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, baseOffset int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex, opts *DownloadOptions) error {
 	// Create target directory if needed
 	targetDir := filepath.Dir(job.OutputPath)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
@@ -233,16 +241,44 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, b
 	}
 	defer outFile.Close()
 
-	// Open the file from the image
+	metadata, err := d.imageAccessor.GetFileMetadata(ctx, job.BlobDigest, job.Path)
+	if err != nil {
+		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+	}
+
+	useChunked := metadata != nil &&
+		len(metadata.Chunks) > 1 &&
+		metadata.Size >= opts.SingleFileChunkThreshold &&
+		job.Size >= opts.SingleFileChunkThreshold
+
+	if useChunked {
+		var maxChunkSize int64
+		for _, chunk := range metadata.Chunks {
+			if chunk.Size > maxChunkSize {
+				maxChunkSize = chunk.Size
+			}
+		}
+		maxAllowedChunk := int64(int(^uint(0) >> 1))
+		if maxChunkSize > maxAllowedChunk {
+			useChunked = false
+		}
+	}
+
+	if useChunked {
+		return d.downloadSingleFileChunked(ctx, job, metadata, outFile, baseOffset, totalSize, progress, mu, opts)
+	}
+
+	return d.downloadSingleFileSequential(ctx, job, outFile, baseOffset, totalSize, progress, mu)
+}
+
+func (d *downloader) downloadSingleFileSequential(ctx context.Context, job *DownloadJob, outFile *os.File, baseOffset int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex) error {
 	fileReader, err := d.imageAccessor.OpenFile(ctx, job.Path, job.BlobDigest)
 	if err != nil {
 		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
-	// Wrap fileReader with progress tracking if callback is provided
-	var readerToUse io.Reader = fileReader
+	readerToUse := io.Reader(fileReader)
 	if progress != nil {
-		// Update total progress bar with mutex protection
 		readerToUse = &progressReader{
 			reader: fileReader,
 			total:  job.Size,
@@ -254,10 +290,128 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, b
 		}
 	}
 
-	// Copy file content to target
-	_, err = io.Copy(outFile, readerToUse)
+	if _, err := io.Copy(outFile, readerToUse); err != nil {
+		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+	}
+
+	return nil
+}
+
+func (d *downloader) downloadSingleFileChunked(
+	ctx context.Context,
+	job *DownloadJob,
+	metadata *FileMetadata,
+	outFile *os.File,
+	baseOffset int64,
+	totalSize int64,
+	progress ProgressCallback,
+	mu *sync.Mutex,
+	opts *DownloadOptions,
+) error {
+	if metadata == nil || len(metadata.Chunks) == 0 {
+		return d.downloadSingleFileSequential(ctx, job, outFile, baseOffset, totalSize, progress, mu)
+	}
+
+	ctxChunk, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	reader, err := d.imageAccessor.OpenFile(ctxChunk, job.Path, job.BlobDigest)
 	if err != nil {
 		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+	}
+
+	chunkConcurrency := opts.Concurrency
+	if chunkConcurrency <= 0 {
+		chunkConcurrency = 1
+	}
+	if chunkConcurrency > len(metadata.Chunks) {
+		chunkConcurrency = len(metadata.Chunks)
+	}
+	if chunkConcurrency < 1 {
+		chunkConcurrency = 1
+	}
+
+	chunkJobs := make(chan Chunk)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	var completed int64
+
+	sendErr := func(err error) {
+		if err == nil {
+			return
+		}
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+
+	for i := 0; i < chunkConcurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for chunk := range chunkJobs {
+				if chunk.Size <= 0 {
+					continue
+				}
+
+				if ctxChunk.Err() != nil {
+					return
+				}
+
+				buf := make([]byte, int(chunk.Size))
+				n, err := reader.ReadAt(buf, chunk.Offset)
+				if err != nil && !(err == io.EOF && int64(n) == chunk.Size) {
+					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
+					cancel()
+					return
+				}
+				if int64(n) != chunk.Size {
+					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(io.ErrUnexpectedEOF))
+					cancel()
+					return
+				}
+
+				if _, err := outFile.WriteAt(buf[:n], chunk.Offset); err != nil {
+					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
+					cancel()
+					return
+				}
+
+				if progress != nil {
+					newProgress := atomic.AddInt64(&completed, int64(n))
+					mu.Lock()
+					progress(baseOffset+newProgress, totalSize)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+
+chunkLoop:
+	for _, chunk := range metadata.Chunks {
+		if chunk.Size <= 0 {
+			continue
+		}
+		select {
+		case <-ctxChunk.Done():
+			break chunkLoop
+		case chunkJobs <- chunk:
+		}
+	}
+	close(chunkJobs)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return err
+	default:
+	}
+
+	if metadata.Size >= 0 {
+		if err := outFile.Truncate(metadata.Size); err != nil {
+			return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
+		}
 	}
 
 	return nil

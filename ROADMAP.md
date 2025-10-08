@@ -180,14 +180,14 @@
 
 ## Future Enhancements 🚧
 
-### Phase 6.1: Single File Chunked Download (Not Implemented)
+### Phase 6.1: Single File Chunked Download (In Progress)
 **Goal**: Parallel chunk downloads for single large files
 
 **Planned Features**:
-- [ ] Detect file size threshold (e.g., > 10MB)
-- [ ] Split into chunks (e.g., 4MB each)
-- [ ] Use HTTP Range requests for concurrent chunk downloads
-- [ ] Reassemble chunks in correct order
+- [x] Detect file size threshold (default 10MB, configurable via `DownloadOptions`)
+- [x] Split into chunks (leveraging TOC chunk metadata)
+- [x] Use HTTP Range requests for concurrent chunk downloads
+- [x] Reassemble chunks in correct order
 - [ ] Handle chunk retry independently
 - [ ] **Validation**: Compare download time vs sequential download
 

@@ -1,6 +1,6 @@
 module github.com/flaneur2020/stargz-get
 
-go 1.24.5
+go 1.16
 
 require (
 	github.com/containerd/stargz-snapshotter/estargz v0.17.0 // indirect
@@ -17,3 +17,5 @@ require (
 	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/term v0.28.0 // indirect
 )
+
+replace github.com/containerd/stargz-snapshotter/estargz => ./third_party/estargz

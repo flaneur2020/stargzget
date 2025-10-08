@@ -14,7 +14,8 @@ import (
 
 // mockImageAccessor is a mock implementation of ImageAccessor for testing
 type mockImageAccessor struct {
-	files map[string][]byte // path -> file content
+	files     map[string][]byte // path -> file content
+	chunkSize int64             // optional chunk size for metadata
 }
 
 func (m *mockImageAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
@@ -28,6 +29,41 @@ func (m *mockImageAccessor) OpenFile(ctx context.Context, path string, blobDiges
 		return nil, io.EOF
 	}
 	return io.NewSectionReader(bytes.NewReader(content), 0, int64(len(content))), nil
+}
+
+func (m *mockImageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
+	content, ok := m.files[path]
+	if !ok {
+		return nil, ErrFileNotFound.WithDetail("path", path)
+	}
+
+	size := int64(len(content))
+	if size == 0 {
+		return &FileMetadata{Size: 0, Chunks: []Chunk{}}, nil
+	}
+
+	chunkSize := m.chunkSize
+	if chunkSize <= 0 || chunkSize > size {
+		chunkSize = size
+	}
+
+	chunks := make([]Chunk, 0, (size+chunkSize-1)/chunkSize)
+	for offset := int64(0); offset < size; offset += chunkSize {
+		remaining := size - offset
+		current := chunkSize
+		if remaining < current {
+			current = remaining
+		}
+		if current <= 0 {
+			break
+		}
+		chunks = append(chunks, Chunk{Offset: offset, Size: current})
+	}
+
+	return &FileMetadata{
+		Size:   size,
+		Chunks: chunks,
+	}, nil
 }
 
 func (m *mockImageAccessor) WithCredential(username, password string) ImageAccessor {
@@ -174,6 +210,66 @@ func TestDownloader_StartDownload(t *testing.T) {
 	}
 }
 
+func TestDownloader_SingleFileChunkedDownload(t *testing.T) {
+	tempDir := t.TempDir()
+
+	content := bytes.Repeat([]byte("chunk-data"), 64) // 640 bytes
+	mockAccessor := &mockImageAccessor{
+		files: map[string][]byte{
+			"usr/bin/bash": content,
+		},
+		chunkSize: 128,
+	}
+
+	downloader := NewDownloader(mockAccessor)
+	job := &DownloadJob{
+		Path:       "usr/bin/bash",
+		BlobDigest: digest.FromString("blob"),
+		Size:       int64(len(content)),
+		OutputPath: filepath.Join(tempDir, "bash"),
+	}
+
+	var lastCurrent int64
+	var progressCalls int
+	progress := func(current, total int64) {
+		progressCalls++
+		lastCurrent = current
+	}
+
+	opts := &DownloadOptions{
+		Concurrency:              4,
+		SingleFileChunkThreshold: 256,
+	}
+
+	stats, err := downloader.StartDownload(context.Background(), []*DownloadJob{job}, progress, opts)
+	if err != nil {
+		t.Fatalf("StartDownload() unexpected error: %v", err)
+	}
+
+	if stats.DownloadedFiles != 1 {
+		t.Fatalf("DownloadedFiles = %d, want 1", stats.DownloadedFiles)
+	}
+
+	if stats.DownloadedBytes != int64(len(content)) {
+		t.Fatalf("DownloadedBytes = %d, want %d", stats.DownloadedBytes, len(content))
+	}
+
+	data, err := os.ReadFile(job.OutputPath)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if !bytes.Equal(data, content) {
+		t.Fatalf("output content mismatch")
+	}
+
+	if progressCalls == 0 {
+		t.Fatalf("expected progress callback to be invoked")
+	}
+	if lastCurrent != int64(len(content)) {
+		t.Fatalf("progress current = %d, want %d", lastCurrent, len(content))
+	}
+}
+
 func TestDownloadJob_Creation(t *testing.T) {
 	digest1 := digest.FromString("test-digest")
 
@@ -236,6 +332,24 @@ func (m *mockFailingAccessor) OpenFile(ctx context.Context, path string, blobDig
 	return io.NewSectionReader(bytes.NewReader(content), 0, int64(len(content))), nil
 }
 
+func (m *mockFailingAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
+	content, ok := m.files[path]
+	if !ok {
+		return nil, ErrFileNotFound.WithDetail("path", path)
+	}
+
+	size := int64(len(content))
+	chunks := []Chunk{}
+	if size > 0 {
+		chunks = append(chunks, Chunk{Offset: 0, Size: size})
+	}
+
+	return &FileMetadata{
+		Size:   size,
+		Chunks: chunks,
+	}, nil
+}
+
 func (m *mockFailingAccessor) WithCredential(username, password string) ImageAccessor {
 	// Return self for testing
 	return m
@@ -249,12 +363,12 @@ func TestDownloader_StartDownload_WithRetries(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	tests := []struct {
-		name          string
-		failCount     map[string]int // path -> number of times to fail before success
-		maxRetries    int
-		wantSuccess   int
-		wantFailed    int
-		wantRetries   int
+		name        string
+		failCount   map[string]int // path -> number of times to fail before success
+		maxRetries  int
+		wantSuccess int
+		wantFailed  int
+		wantRetries int
 	}{
 		{
 			name: "succeed on first attempt",

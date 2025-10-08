@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/containerd/stargz-snapshotter/estargz"
@@ -164,6 +165,9 @@ type ImageAccessor interface {
 	// ImageIndex returns the index of all files in the image
 	ImageIndex(ctx context.Context) (*ImageIndex, error)
 
+	// GetFileMetadata returns metadata (size and chunk layout) for a file
+	GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error)
+
 	// OpenFile opens a file from the image
 	// blobDigest is required and specifies which blob to open the file from
 	OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error)
@@ -178,9 +182,10 @@ type FileMetadata struct {
 }
 
 type Chunk struct {
-	Offset         int64
-	Size           int64
-	CompressedSize int64 // Size in the blob (compressed)
+	Offset           int64 // Uncompressed offset within the file
+	Size             int64 // Uncompressed size of this chunk
+	CompressedOffset int64 // Offset within the blob for the compressed chunk
+	CompressedSize   int64 // Size in the blob (compressed)
 }
 
 type imageAccessor struct {
@@ -511,31 +516,78 @@ func (i *imageAccessor) listFiles(ctx context.Context, blobDigest digest.Digest)
 	return files, nil
 }
 
-// getFileMetadata is a private helper method for internal use
-func (i *imageAccessor) getFileMetadata(ctx context.Context, blobDigest digest.Digest, fileName string) (*FileMetadata, error) {
+// GetFileMetadata returns metadata about a file, including its chunk layout.
+func (i *imageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, fileName string) (*FileMetadata, error) {
 	toc, err := i.downloadTOC(ctx, blobDigest.String())
 	if err != nil {
 		return nil, err
 	}
 
-	// Find the file entry
+	var (
+		found    bool
+		fileSize int64
+		chunks   []Chunk
+	)
+
 	for _, entry := range toc.Entries {
-		if entry.Name == fileName && entry.Type == "reg" {
-			// For now, treat as single chunk (will handle chunking later in Phase 3)
-			return &FileMetadata{
-				Size: entry.Size,
-				Chunks: []Chunk{
-					{
-						Offset:         entry.Offset,
-						Size:           entry.Size,
-						CompressedSize: entry.ChunkSize,
-					},
-				},
-			}, nil
+		if entry.Name != fileName {
+			continue
+		}
+
+		switch entry.Type {
+		case "reg":
+			found = true
+			fileSize = entry.Size
+			chunkSize := entry.ChunkSize
+			if chunkSize == 0 && entry.Size != 0 {
+				chunkSize = entry.Size
+			}
+			chunks = append(chunks, Chunk{
+				Offset:           entry.ChunkOffset,
+				Size:             chunkSize,
+				CompressedOffset: entry.Offset,
+				CompressedSize:   entry.ChunkSize,
+			})
+		case "chunk":
+			found = true
+			chunkSize := entry.ChunkSize
+			if chunkSize == 0 && fileSize != 0 {
+				chunkSize = fileSize - entry.ChunkOffset
+			}
+			chunks = append(chunks, Chunk{
+				Offset:           entry.ChunkOffset,
+				Size:             chunkSize,
+				CompressedOffset: entry.Offset,
+				CompressedSize:   entry.ChunkSize,
+			})
 		}
 	}
 
-	return nil, fmt.Errorf("file not found: %s", fileName)
+	if !found {
+		return nil, fmt.Errorf("file not found: %s", fileName)
+	}
+
+	sort.Slice(chunks, func(i, j int) bool {
+		return chunks[i].Offset < chunks[j].Offset
+	})
+
+	for idx := range chunks {
+		if chunks[idx].Size == 0 {
+			nextOffset := fileSize
+			if idx+1 < len(chunks) {
+				nextOffset = chunks[idx+1].Offset
+			}
+			chunks[idx].Size = nextOffset - chunks[idx].Offset
+			if chunks[idx].Size < 0 {
+				chunks[idx].Size = 0
+			}
+		}
+	}
+
+	return &FileMetadata{
+		Size:   fileSize,
+		Chunks: chunks,
+	}, nil
 }
 
 // ImageIndex returns the index of all files in the image
@@ -635,19 +687,5 @@ func (i *imageAccessor) OpenFile(ctx context.Context, path string, blobDigest di
 		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
 	}
 
-	// Get file metadata to know the size
-	metadata, err := i.getFileMetadata(ctx, blobDigest, path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get file metadata: %w", err)
-	}
-
-	// Return a SectionReader that reads from the file
-	// We need to wrap the fileReader in a way that allows ReadAt
-	// Since fileReader is just an io.Reader, we need to read all content first
-	content, err := io.ReadAll(fileReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file content: %w", err)
-	}
-
-	return io.NewSectionReader(bytes.NewReader(content), 0, metadata.Size), nil
+	return fileReader, nil
 }
