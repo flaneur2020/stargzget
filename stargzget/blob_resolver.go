@@ -123,12 +123,7 @@ func (r *blobResolver) loadTOC(ctx context.Context, blobDigest digest.Digest) (*
 	}
 	defer reader.Close()
 
-	tocBytes, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest.String()).WithCause(err)
-	}
-
-	toc, err := estargzutil.ParseTOC(tocBytes)
+	toc, err := estargzutil.ReadTOC(reader)
 	if err != nil {
 		return nil, stargzerrors.ErrTOCDownload.WithDetail("blobDigest", blobDigest.String()).WithCause(err)
 	}
