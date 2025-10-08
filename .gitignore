@@ -34,5 +34,8 @@ output/
 .settings/
 *.iml
 
+.gocache/
+.gomodcache/
+
 # Claude Code (optional - uncomment if you want to keep it private)
 # .claude/

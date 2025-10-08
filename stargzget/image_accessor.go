@@ -452,8 +452,7 @@ func (r *httpBlobReader) getSize() (int64, error) {
 	// Handle 401
 	if resp.StatusCode == http.StatusUnauthorized {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		token, err := r.imageAccessor.getAuthToken(r.ctx, wwwAuth)
-		if err != nil {
+		if _, err := r.imageAccessor.getAuthToken(r.ctx, wwwAuth); err != nil {
 			return -1, fmt.Errorf("auth failed: %w", err)
 		}
 
@@ -522,8 +521,7 @@ func (r *httpBlobReader) openRangeReader(off int64) (io.ReadCloser, error) {
 	if resp.StatusCode == http.StatusUnauthorized {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
 		resp.Body.Close()
-		token, err := r.imageAccessor.getAuthToken(r.ctx, wwwAuth)
-		if err != nil {
+		if _, err := r.imageAccessor.getAuthToken(r.ctx, wwwAuth); err != nil {
 			return nil, fmt.Errorf("auth failed: %w", err)
 		}
 		req, err = http.NewRequestWithContext(r.ctx, "GET", r.url, nil)
