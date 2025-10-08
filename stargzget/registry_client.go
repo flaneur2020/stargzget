@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/flaneur2020/stargz-get/logger"
+	"github.com/flaneur2020/stargz-get/stargzget/logger"
 )
 
 type RegistryClient interface {
@@ -40,8 +40,8 @@ type Layer struct {
 func (l *Layer) IsStargz() bool {
 	// stargz layers use these media types
 	return strings.Contains(l.MediaType, "gzip") ||
-	       strings.Contains(l.MediaType, "zstd+esgz") ||
-	       l.MediaType == "application/vnd.oci.image.layer.v1.tar+gzip"
+		strings.Contains(l.MediaType, "zstd+esgz") ||
+		l.MediaType == "application/vnd.oci.image.layer.v1.tar+gzip"
 }
 
 type registryClient struct {

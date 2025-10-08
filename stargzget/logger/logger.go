@@ -99,10 +99,8 @@ func redactSensitive(message string) string {
 
 	// Redact tokens in URLs
 	if strings.Contains(message, "token=") {
-		// Simple regex-like replacement for token parameters
 		parts := strings.Split(message, "token=")
 		if len(parts) > 1 {
-			// Replace everything after token= until next & or space
 			for i := 1; i < len(parts); i++ {
 				endIdx := strings.IndexAny(parts[i], "& \n")
 				if endIdx == -1 {

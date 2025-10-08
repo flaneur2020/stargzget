@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/flaneur2020/stargz-get/logger"
 	"github.com/flaneur2020/stargz-get/stargzget"
+	"github.com/flaneur2020/stargz-get/stargzget/logger"
 	"github.com/opencontainers/go-digest"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"

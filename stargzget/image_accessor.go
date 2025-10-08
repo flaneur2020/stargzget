@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/flaneur2020/stargz-get/estargzutil"
-	"github.com/flaneur2020/stargz-get/logger"
+	"github.com/flaneur2020/stargz-get/stargzget/estargzutil"
+	"github.com/flaneur2020/stargz-get/stargzget/logger"
 	"github.com/opencontainers/go-digest"
 )
 
