@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
@@ -518,76 +517,27 @@ func (i *imageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.D
 		return nil, err
 	}
 
-	var (
-		found    bool
-		fileSize int64
-		chunks   []Chunk
-	)
-
-	for _, entry := range toc.Entries {
-		if entry.Name != fileName {
-			continue
-		}
-
-		switch entry.Type {
-		case "reg":
-			found = true
-			fileSize = entry.Size
-			chunkSize := entry.ChunkSize
-			if chunkSize == 0 && entry.Size != 0 {
-				chunkSize = entry.Size
-			}
-			chunks = append(chunks, Chunk{
-				Offset:           entry.ChunkOffset,
-				Size:             chunkSize,
-				CompressedOffset: entry.Offset,
-				InnerOffset:      entry.InnerOffset,
-			})
-		case "chunk":
-			found = true
-			chunkSize := entry.ChunkSize
-			if chunkSize == 0 && fileSize != 0 {
-				chunkSize = fileSize - entry.ChunkOffset
-			}
-			chunks = append(chunks, Chunk{
-				Offset:           entry.ChunkOffset,
-				Size:             chunkSize,
-				CompressedOffset: entry.Offset,
-				InnerOffset:      entry.InnerOffset,
-			})
-		}
+	size, estChunks, err := estargzutil.ChunksForFile(toc, fileName)
+	if err != nil {
+		return nil, err
 	}
 
-	if !found {
-		return nil, fmt.Errorf("file not found: %s", fileName)
+	var chunks []Chunk
+	if err != nil {
+		return nil, err
 	}
 
-	sort.Slice(chunks, func(i, j int) bool {
-		if chunks[i].Offset == chunks[j].Offset {
-			return chunks[i].InnerOffset < chunks[j].InnerOffset
-		}
-		return chunks[i].Offset < chunks[j].Offset
-	})
-
-	for idx := range chunks {
-		if chunks[idx].Size == 0 {
-			nextOffset := fileSize
-			if idx+1 < len(chunks) {
-				nextOffset = chunks[idx+1].Offset
-			}
-			size := nextOffset - chunks[idx].Offset
-			if size <= 0 {
-				size = fileSize - chunks[idx].Offset
-			}
-			if size < 0 {
-				size = 0
-			}
-			chunks[idx].Size = size
-		}
+	for _, ch := range estChunks {
+		chunks = append(chunks, Chunk{
+			Offset:           ch.Offset,
+			Size:             ch.Size,
+			CompressedOffset: ch.CompressedOffset,
+			InnerOffset:      ch.InnerOffset,
+		})
 	}
 
 	return &FileMetadata{
-		Size:   fileSize,
+		Size:   size,
 		Chunks: chunks,
 	}, nil
 }
