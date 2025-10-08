@@ -9,6 +9,7 @@ import (
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/flaneur2020/stargz-get/stargzget/estargzutil"
+	stor "github.com/flaneur2020/stargz-get/stargzget/storage"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -19,7 +20,7 @@ type ChunkResolver interface {
 	TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error)
 }
 
-func NewChunkResolver(storage Storage) ChunkResolver {
+func NewChunkResolver(storage stor.Storage) ChunkResolver {
 	return &chunkResolver{
 		storage:  storage,
 		tocCache: make(map[digest.Digest]*estargzutil.JTOC),
@@ -27,7 +28,7 @@ func NewChunkResolver(storage Storage) ChunkResolver {
 }
 
 type chunkResolver struct {
-	storage   Storage
+	storage   stor.Storage
 	mu        sync.Mutex
 	blobSizes map[digest.Digest]int64
 	tocCache  map[digest.Digest]*estargzutil.JTOC

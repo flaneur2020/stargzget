@@ -156,7 +156,7 @@ type FileInfo struct {
 2. For each job:
    - Try download with retry loop
    - Create output directory if needed
-   - Open file via ImageAccessor
+  - Downloader uses ChunkResolver + Storage to stream file chunks
    - Copy content with progress tracking
    - Retry on failure (up to MaxRetries)
 3. Return statistics (success/failed/retries)
@@ -328,18 +328,8 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (int, error) {
 - Lazy progress bar initialization (only when total size is known)
 
 **Implementation**:
-```go
-type ProgressCallback func(current int64, total int64)
-
-// In Downloader
-progressReader := &progressReader{
-    reader: fileReader,
-    total:  job.Size,
-    callback: func(current, total int64) {
-        progress(currentTotal + current, totalSize)
-    },
-}
-```
+- Each chunk download reports its byte count via an atomic accumulator
+- The accumulator value plus the job's base offset drives the shared progress callback
 
 ## Security Considerations
 
@@ -423,7 +413,7 @@ progressReader := &progressReader{
 3. **Error Handling**: Structured error creation and unwrapping
 
 **Mocking Strategy**:
-- Mock `ImageAccessor` for downloader tests
+- Mock `ChunkResolver` for downloader tests
 - Mock file content with in-memory readers
 - Simulate failures for retry testing
 

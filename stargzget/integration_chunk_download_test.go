@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/flaneur2020/stargz-get/stargzget"
+	stor "github.com/flaneur2020/stargz-get/stargzget/storage"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -27,7 +28,7 @@ func TestIntegrationSingleFileChunkedDownload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	client := stargzget.NewRegistryClient()
+	client := stor.NewRemoteRegistryStorage()
 
 	manifest, err := client.GetManifest(ctx, imageRef)
 	if err != nil {

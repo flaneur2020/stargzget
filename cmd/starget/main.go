@@ -9,6 +9,7 @@ import (
 
 	"github.com/flaneur2020/stargz-get/stargzget"
 	"github.com/flaneur2020/stargz-get/stargzget/logger"
+	stor "github.com/flaneur2020/stargz-get/stargzget/storage"
 	"github.com/opencontainers/go-digest"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
@@ -105,7 +106,7 @@ func parseCredential(cred string) (string, string, error) {
 func runInfo(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 
-	client := stargzget.NewRegistryClient()
+	client := stor.NewRemoteRegistryStorage()
 
 	// Apply credentials if provided
 	if credential != "" {
@@ -144,7 +145,7 @@ func runLs(cmd *cobra.Command, args []string) {
 	}
 
 	// Get manifest first
-	registryClient := stargzget.NewRegistryClient()
+	registryClient := stor.NewRemoteRegistryStorage()
 
 	// Apply credentials if provided
 	if credential != "" {
@@ -242,7 +243,7 @@ func runGet(cmd *cobra.Command, args []string) {
 	}
 
 	// Get manifest first
-	registryClient := stargzget.NewRegistryClient()
+	registryClient := stor.NewRemoteRegistryStorage()
 
 	// Apply credentials if provided
 	if credential != "" {

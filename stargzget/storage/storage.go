@@ -1,4 +1,4 @@
-package stargzget
+package storage
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-// BlobDescriptor describes a blob available in storage.
+// BlobDescriptor describes a blob available from storage.
 type BlobDescriptor struct {
 	Digest    digest.Digest
 	Size      int64

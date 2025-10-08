@@ -7,6 +7,7 @@ import (
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/flaneur2020/stargz-get/stargzget/logger"
+	stor "github.com/flaneur2020/stargz-get/stargzget/storage"
 	"github.com/opencontainers/go-digest"
 )
 
@@ -15,11 +16,11 @@ type ImageIndexLoader interface {
 }
 
 type imageIndexLoader struct {
-	storage  Storage
+	storage  stor.Storage
 	resolver ChunkResolver
 }
 
-func NewImageIndexLoader(storage Storage, resolver ChunkResolver) ImageIndexLoader {
+func NewImageIndexLoader(storage stor.Storage, resolver ChunkResolver) ImageIndexLoader {
 	return &imageIndexLoader{
 		storage:  storage,
 		resolver: resolver,
@@ -191,7 +192,7 @@ func (m pathMatcher) matches(path string) bool {
 	return path == m.pattern || strings.HasPrefix(path, m.pattern+"/")
 }
 
-func validateBlobDescriptors(blobs []BlobDescriptor) error {
+func validateBlobDescriptors(blobs []stor.BlobDescriptor) error {
 	if len(blobs) == 0 {
 		return fmt.Errorf("no blobs found in storage")
 	}
