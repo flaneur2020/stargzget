@@ -77,8 +77,10 @@ type BlobDescriptor struct {
 
 **Implementation Details**:
 ```go
-type RegistryClient interface {
+type RemoteRegistryStorage interface {
     GetManifest(ctx context.Context, imageRef string) (*Manifest, error)
+    WithCredential(username, password string) RemoteRegistryStorage
+    NewStorage(registry, repository string, manifest *Manifest) Storage
 }
 
 type Manifest struct {
@@ -89,18 +91,14 @@ type Manifest struct {
 }
 ```
 
-#### 2. ImageIndexLoader
+#### 2. BlobIndexLoader
 
 **Responsibility**: Builds an `ImageIndex` from a `Storage` instance by reading TOCs and metadata.
 
 ```go
-type ImageIndexLoader interface {
-    Load(ctx context.Context) (*ImageIndex, error)
-}
-
-type imageIndexLoader struct {
-    storage Storage
-    manifest *Manifest
+type BlobIndexLoader struct {
+    storage  Storage
+    resolver BlobResolver
 }
 ```
 
@@ -156,7 +154,7 @@ type FileInfo struct {
 2. For each job:
    - Try download with retry loop
    - Create output directory if needed
-  - Downloader uses ChunkResolver + Storage to stream file chunks
+  - Downloader uses BlobResolver + Storage to stream file chunks
    - Copy content with progress tracking
    - Retry on failure (up to MaxRetries)
 3. Return statistics (success/failed/retries)
@@ -227,11 +225,11 @@ CLI → RegistryClient: GetManifest()
   ↓
 CLI → Storage: NewStorage(manifest)
   ↓
-CLI → ImageIndexLoader: Load()
+CLI → BlobIndexLoader: Load()
   ↓
-ImageIndexLoader → ChunkResolver: TOC()
+BlobIndexLoader → BlobResolver: TOC()
   ↓
-ChunkResolver → Storage: Download TOC via Range requests
+BlobResolver → Storage: Download TOC via Range requests
   ↓
 CLI: Filter files by blob digest
   ↓
@@ -249,7 +247,7 @@ CLI → RegistryClient: GetManifest()
   ↓
 CLI → Storage: NewStorage(manifest)
   ↓
-CLI → ImageIndexLoader: Load()
+CLI → BlobIndexLoader: Load()
   ↓
 CLI → ImageIndex: FilterFiles(pattern, blob)
   ↓
@@ -258,8 +256,8 @@ CLI: Create DownloadJob list
 CLI → Downloader: StartDownload(jobs, progress, opts)
   ↓
 Downloader (for each job):
-  ├─→ ChunkResolver: FileMetadata(path, blob)
-  ├─→ ChunkResolver: ReadChunk(blob, offset)
+  ├─→ BlobResolver: FileMetadata(path, blob)
+  ├─→ BlobResolver: ReadChunk(blob, offset)
   │   └─→ Storage: Range request + chunk decompression
   ├─→ Write to output file
   └─→ Update progress
@@ -310,7 +308,7 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (int, error) {
 ### 3. Caching Strategy
 
 **TOC Caching**:
-- ChunkResolver caches parsed TOCs in-memory per blob digest
+- BlobResolver caches parsed TOCs in-memory per blob digest
 - Persists for the lifetime of the resolver instance
 
 **Why not cache file content?**
@@ -413,7 +411,7 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (int, error) {
 3. **Error Handling**: Structured error creation and unwrapping
 
 **Mocking Strategy**:
-- Mock `ChunkResolver` for downloader tests
+- Mock `BlobResolver` for downloader tests
 - Mock file content with in-memory readers
 - Simulate failures for retry testing
 

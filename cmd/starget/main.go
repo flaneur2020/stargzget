@@ -164,8 +164,8 @@ func runLs(cmd *cobra.Command, args []string) {
 	}
 
 	storage := registryClient.NewStorage(registry, repository, manifest)
-	resolver := stargzget.NewChunkResolver(storage)
-	loader := stargzget.NewImageIndexLoader(storage, resolver)
+	resolver := stargzget.NewBlobResolver(storage)
+	loader := stargzget.NewBlobIndexLoader(storage, resolver)
 
 	index, err := loader.Load(context.Background())
 	if err != nil {
@@ -262,8 +262,8 @@ func runGet(cmd *cobra.Command, args []string) {
 	}
 
 	storage := registryClient.NewStorage(registry, repository, manifest)
-	resolver := stargzget.NewChunkResolver(storage)
-	loader := stargzget.NewImageIndexLoader(storage, resolver)
+	resolver := stargzget.NewBlobResolver(storage)
+	loader := stargzget.NewBlobIndexLoader(storage, resolver)
 	downloader := stargzget.NewDownloader(resolver)
 
 	// Parse blob digest if provided

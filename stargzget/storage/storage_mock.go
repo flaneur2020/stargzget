@@ -13,15 +13,15 @@ import (
 // MockStorage is a simple in-memory Storage implementation for tests.
 type MockStorage struct {
 	mu         sync.RWMutex
-	Blobs      map[digest.Digest][]byte
-	MediaTypes map[digest.Digest]string
+	blobs      map[digest.Digest][]byte
+	mediaTypes map[digest.Digest]string
 }
 
 // NewMockStorage constructs an empty MockStorage.
 func NewMockStorage() *MockStorage {
 	return &MockStorage{
-		Blobs:      make(map[digest.Digest][]byte),
-		MediaTypes: make(map[digest.Digest]string),
+		blobs:      make(map[digest.Digest][]byte),
+		mediaTypes: make(map[digest.Digest]string),
 	}
 }
 
@@ -30,12 +30,12 @@ func (m *MockStorage) ListBlobs(ctx context.Context) ([]BlobDescriptor, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	descs := make([]BlobDescriptor, 0, len(m.Blobs))
-	for dgst, data := range m.Blobs {
+	descs := make([]BlobDescriptor, 0, len(m.blobs))
+	for dgst, data := range m.blobs {
 		descs = append(descs, BlobDescriptor{
 			Digest:    dgst,
 			Size:      int64(len(data)),
-			MediaType: m.MediaTypes[dgst],
+			MediaType: m.mediaTypes[dgst],
 		})
 	}
 	return descs, nil
@@ -46,7 +46,7 @@ func (m *MockStorage) ReadBlob(ctx context.Context, digest digest.Digest, offset
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	data, ok := m.Blobs[digest]
+	data, ok := m.blobs[digest]
 	if !ok {
 		return nil, fmt.Errorf("mock storage: blob not found: %s", digest)
 	}
@@ -69,7 +69,7 @@ func (m *MockStorage) AddBlob(mediaType string, data []byte) digest.Digest {
 	defer m.mu.Unlock()
 
 	dgst := digest.FromBytes(data)
-	m.Blobs[dgst] = append([]byte(nil), data...)
-	m.MediaTypes[dgst] = mediaType
+	m.blobs[dgst] = append([]byte(nil), data...)
+	m.mediaTypes[dgst] = mediaType
 	return dgst
 }

@@ -6,20 +6,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	stargzerrors "github.com/flaneur2020/stargz-get/stargzget/errors"
 	"github.com/flaneur2020/stargz-get/stargzget/estargzutil"
+	stor "github.com/flaneur2020/stargz-get/stargzget/storage"
 	"github.com/opencontainers/go-digest"
 )
 
-type mockChunkResolver struct {
+type mockBlobResolver struct {
 	files     map[string][]byte
 	chunkSize int64
 }
 
-func (m *mockChunkResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
+func (m *mockBlobResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
 		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
@@ -51,7 +54,7 @@ func (m *mockChunkResolver) FileMetadata(ctx context.Context, blobDigest digest.
 	return &FileMetadata{Size: size, Chunks: chunks}, nil
 }
 
-func (m *mockChunkResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
+func (m *mockBlobResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
 	content, ok := m.files[path]
 	if !ok {
 		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
@@ -68,7 +71,7 @@ func (m *mockChunkResolver) ReadChunk(ctx context.Context, blobDigest digest.Dig
 	return buf, nil
 }
 
-func (m *mockChunkResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
+func (m *mockBlobResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
 	return &estargzutil.JTOC{}, nil
 }
 
@@ -81,7 +84,7 @@ func TestDownloader_StartDownload(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	// Setup mock resolver with test files
-	mockResolver := &mockChunkResolver{
+	mockResolver := &mockBlobResolver{
 		files: map[string][]byte{
 			"bin/echo": []byte("echo content"),
 			"bin/cat":  []byte("cat content"),
@@ -217,7 +220,7 @@ func TestDownloader_SingleFileChunkedDownload(t *testing.T) {
 	tempDir := t.TempDir()
 
 	content := bytes.Repeat([]byte("chunk-data"), 64) // 640 bytes
-	mockResolver := &mockChunkResolver{
+	mockResolver := &mockBlobResolver{
 		files: map[string][]byte{
 			"usr/bin/bash": content,
 		},
@@ -296,14 +299,14 @@ func TestDownloadJob_Creation(t *testing.T) {
 	}
 }
 
-type mockFailingResolver struct {
+type mockFailingBlobResolver struct {
 	files        map[string][]byte
 	failCount    map[string]int
 	attemptCount map[string]int
 	mu           sync.Mutex
 }
 
-func (m *mockFailingResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
+func (m *mockFailingBlobResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
 		return nil, stargzerrors.ErrFileNotFound.WithDetail("path", path)
@@ -318,7 +321,7 @@ func (m *mockFailingResolver) FileMetadata(ctx context.Context, blobDigest diges
 	return &FileMetadata{Size: size, Chunks: chunks}, nil
 }
 
-func (m *mockFailingResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
+func (m *mockFailingBlobResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -350,7 +353,7 @@ func (m *mockFailingResolver) ReadChunk(ctx context.Context, blobDigest digest.D
 	return buf, nil
 }
 
-func (m *mockFailingResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
+func (m *mockFailingBlobResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
 	return &estargzutil.JTOC{}, nil
 }
 
@@ -425,7 +428,7 @@ func TestDownloader_StartDownload_WithRetries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockResolver := &mockFailingResolver{
+			mockResolver := &mockFailingBlobResolver{
 				files: map[string][]byte{
 					"file1": []byte("content1"),
 					"file2": []byte("content2"),
@@ -480,7 +483,7 @@ func TestDownloader_Concurrency(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	// Create mock accessor with multiple files
-	mockResolver := &mockChunkResolver{
+	mockResolver := &mockBlobResolver{
 		files: map[string][]byte{
 			"file1": []byte("content1"),
 			"file2": []byte("content2"),
@@ -593,7 +596,7 @@ func TestDownloader_ConcurrencyWithRetries(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	mockResolver := &mockFailingResolver{
+	mockResolver := &mockFailingBlobResolver{
 		files: map[string][]byte{
 			"file1": []byte("content1"),
 			"file2": []byte("content2"),
@@ -645,4 +648,104 @@ func TestDownloader_ConcurrencyWithRetries(t *testing.T) {
 	if stats.Retries != 5 {
 		t.Errorf("Retries = %d, want 5", stats.Retries)
 	}
+}
+
+func TestIntegrationSingleFileChunkedDownload(t *testing.T) {
+	if testing.Short() || os.Getenv("STARGZ_INTEGRATION") == "" {
+		t.Skip("set STARGZ_INTEGRATION=1 to run integration test")
+	}
+
+	const imageRef = "ghcr.io/stargz-containers/node:13.13.0-esgz"
+	const targetPath = "usr/bin/bash"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	client := stor.NewRemoteRegistryStorage()
+	manifest, err := client.GetManifest(ctx, imageRef)
+	if err != nil {
+		t.Fatalf("GetManifest(%q) error = %v", imageRef, err)
+	}
+
+	registry, repository := splitImageRef(t, imageRef)
+	storage := client.NewStorage(registry, repository, manifest)
+	resolver := NewBlobResolver(storage)
+	loader := NewBlobIndexLoader(storage, resolver)
+
+	index, err := loader.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	targetInfo, err := index.FindFile(targetPath, digest.Digest(""))
+	if err != nil {
+		t.Fatalf("FindFile(%q) error = %v", targetPath, err)
+	}
+
+	targetMeta, err := resolver.FileMetadata(ctx, targetInfo.BlobDigest, targetInfo.Path)
+	if err != nil {
+		t.Fatalf("FileMetadata(%q) error = %v", targetPath, err)
+	}
+
+	if len(targetMeta.Chunks) <= 1 {
+		t.Skipf("file %s is not chunked in this image", targetPath)
+	}
+
+	tempDir := t.TempDir()
+	outputPath := filepath.Join(tempDir, "bash")
+
+	job := &DownloadJob{
+		Path:       targetInfo.Path,
+		BlobDigest: targetInfo.BlobDigest,
+		Size:       targetInfo.Size,
+		OutputPath: outputPath,
+	}
+
+	opts := &DownloadOptions{
+		Concurrency:              4,
+		SingleFileChunkThreshold: 1,
+	}
+
+	downloader := NewDownloader(resolver)
+	stats, err := downloader.StartDownload(ctx, []*DownloadJob{job}, nil, opts)
+	if err != nil {
+		t.Fatalf("StartDownload() error = %v", err)
+	}
+
+	if stats.DownloadedFiles != 1 {
+		t.Fatalf("DownloadedFiles = %d, want 1", stats.DownloadedFiles)
+	}
+	if stats.DownloadedBytes != targetInfo.Size {
+		t.Fatalf("DownloadedBytes = %d, want %d", stats.DownloadedBytes, targetInfo.Size)
+	}
+
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", outputPath, err)
+	}
+
+	if info.Size() != targetInfo.Size {
+		t.Fatalf("output size = %d, want %d", info.Size(), targetInfo.Size)
+	}
+}
+
+func splitImageRef(t *testing.T, ref string) (string, string) {
+	t.Helper()
+
+	parts := strings.SplitN(ref, "/", 2)
+	if len(parts) != 2 {
+		t.Fatalf("invalid image reference: %s", ref)
+	}
+
+	registry := parts[0]
+	rest := parts[1]
+
+	repoParts := strings.Split(rest, ":")
+	if len(repoParts) < 2 {
+		t.Fatalf("image reference missing tag: %s", ref)
+	}
+
+	repository := strings.Join(repoParts[:len(repoParts)-1], ":")
+
+	return registry, repository
 }

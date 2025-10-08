@@ -11,23 +11,19 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-type ImageIndexLoader interface {
-	Load(ctx context.Context) (*ImageIndex, error)
-}
-
-type imageIndexLoader struct {
+type BlobIndexLoader struct {
 	storage  stor.Storage
-	resolver ChunkResolver
+	resolver BlobResolver
 }
 
-func NewImageIndexLoader(storage stor.Storage, resolver ChunkResolver) ImageIndexLoader {
-	return &imageIndexLoader{
+func NewBlobIndexLoader(storage stor.Storage, resolver BlobResolver) *BlobIndexLoader {
+	return &BlobIndexLoader{
 		storage:  storage,
 		resolver: resolver,
 	}
 }
 
-func (l *imageIndexLoader) Load(ctx context.Context) (*ImageIndex, error) {
+func (l *BlobIndexLoader) Load(ctx context.Context) (*ImageIndex, error) {
 	blobs, err := l.storage.ListBlobs(ctx)
 	if err != nil {
 		return nil, err

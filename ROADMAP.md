@@ -6,7 +6,7 @@
 **Goal**: Get blob layer list from registry (without auth)
 
 **Completed**:
-- [x] Implement basic `RegistryClient.GetManifest()` for public registry
+- [x] Implement basic `RemoteRegistryStorage.GetManifest()` for public registry
 - [x] Parse manifest JSON to extract layer digests and media types
 - [x] Filter stargz layers (media type: `application/vnd.oci.image.layer.v1.tar+gzip`)
 - [x] **Validation**: Print blob digest list from `ghcr.io/stargz-containers/node:13.13.0-esgz`
@@ -162,8 +162,8 @@
 **Completed Features**:
 - [x] Add `--verbose` flag for detailed logging (INFO level)
 - [x] Add `--debug` flag for developer debugging (DEBUG level)
-- [x] Log HTTP requests and responses in RegistryClient
-- [x] Log TOC download and parsing steps in ChunkResolver
+- [x] Log HTTP requests and responses in RemoteRegistryStorage
+- [x] Log TOC download and parsing steps in BlobResolver
 - [x] Log retry attempts with reasons in Downloader
 - [x] Redact sensitive info (auth tokens, passwords)
 - [x] **Validation**: Tested with real stargz images

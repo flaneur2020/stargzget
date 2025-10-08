@@ -64,12 +64,12 @@ type Downloader interface {
 }
 
 type downloader struct {
-	resolver ChunkResolver
+	resolver BlobResolver
 }
 
 const defaultSingleFileChunkThreshold int64 = 10 * 1024 * 1024 // 10MB
 
-func NewDownloader(resolver ChunkResolver) Downloader {
+func NewDownloader(resolver BlobResolver) Downloader {
 	return &downloader{
 		resolver: resolver,
 	}

@@ -108,8 +108,8 @@ starget get <REGISTRY>/<IMAGE>:<TAG> [BLOB_DIGEST] <PATH_PATTERN> [OUTPUT_DIR]
 
 stargz-get uses a modular architecture with the following components:
 
-- **RegistryClient**: Fetches image manifests from OCI registries
-- **Storage/ChunkResolver**: Chains blob range reads into chunk-level file access
+- **RemoteRegistryStorage**: Fetches image manifests and exposes blob storage for OCI registries
+- **Storage/BlobResolver**: Chains blob range reads into chunk-level file access
 - **ImageIndex**: Provides fast file lookup and filtering across layers
 - **Downloader**: Orchestrates downloads with progress tracking and retry logic
 

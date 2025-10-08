@@ -14,10 +14,10 @@ import (
 )
 
 // RemoteRegistryStorage coordinates manifest fetching and blob access against an OCI registry.
-type RemoteRegistryStorage interface {
-	GetManifest(ctx context.Context, imageRef string) (*Manifest, error)
-	WithCredential(username, password string) RemoteRegistryStorage
-	NewStorage(registry, repository string, manifest *Manifest) Storage
+type RemoteRegistryStorage struct {
+	httpClient *http.Client
+	username   string
+	password   string
 }
 
 // Manifest represents an OCI image manifest.
@@ -44,27 +44,19 @@ type Layer struct {
 }
 
 // NewRemoteRegistryStorage creates a registry-backed storage helper.
-func NewRemoteRegistryStorage() RemoteRegistryStorage {
-	return &remoteRegistryStorage{
-		httpClient: &http.Client{},
-	}
+func NewRemoteRegistryStorage() *RemoteRegistryStorage {
+	return &RemoteRegistryStorage{httpClient: &http.Client{}}
 }
 
-type remoteRegistryStorage struct {
-	httpClient *http.Client
-	username   string
-	password   string
-}
-
-func (c *remoteRegistryStorage) WithCredential(username, password string) RemoteRegistryStorage {
-	return &remoteRegistryStorage{
+func (c *RemoteRegistryStorage) WithCredential(username, password string) *RemoteRegistryStorage {
+	return &RemoteRegistryStorage{
 		httpClient: c.httpClient,
 		username:   username,
 		password:   password,
 	}
 }
 
-func (c *remoteRegistryStorage) NewStorage(registry, repository string, manifest *Manifest) Storage {
+func (c *RemoteRegistryStorage) NewStorage(registry, repository string, manifest *Manifest) Storage {
 	return &registryBlobStorage{
 		client:     c,
 		httpClient: c.httpClient,
@@ -76,7 +68,7 @@ func (c *remoteRegistryStorage) NewStorage(registry, repository string, manifest
 	}
 }
 
-func (c *remoteRegistryStorage) GetManifest(ctx context.Context, imageRef string) (*Manifest, error) {
+func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string) (*Manifest, error) {
 	logger.Info("Fetching manifest for image: %s", imageRef)
 
 	registry, repository, tag, err := parseImageRef(imageRef)
@@ -173,13 +165,13 @@ func (c *remoteRegistryStorage) GetManifest(ctx context.Context, imageRef string
 	return &manifest, nil
 }
 
-func (c *remoteRegistryStorage) applyAuth(req *http.Request) {
+func (c *RemoteRegistryStorage) applyAuth(req *http.Request) {
 	if c.username != "" && c.password != "" {
 		req.SetBasicAuth(c.username, c.password)
 	}
 }
 
-func (c *remoteRegistryStorage) getAuthToken(ctx context.Context, registry, repository, wwwAuthenticate string) (string, error) {
+func (c *RemoteRegistryStorage) getAuthToken(ctx context.Context, registry, repository, wwwAuthenticate string) (string, error) {
 	if !strings.HasPrefix(wwwAuthenticate, "Bearer ") {
 		return "", stargzerrors.ErrAuthFailed.WithCause(fmt.Errorf("unsupported auth scheme: %s", wwwAuthenticate))
 	}
@@ -234,7 +226,7 @@ func (c *remoteRegistryStorage) getAuthToken(ctx context.Context, registry, repo
 }
 
 type registryBlobStorage struct {
-	client     *remoteRegistryStorage
+	client     *RemoteRegistryStorage
 	httpClient *http.Client
 	registry   string
 	repository string

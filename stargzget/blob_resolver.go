@@ -13,28 +13,28 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-// ChunkResolver resolves file metadata and chunk contents using Storage.
-type ChunkResolver interface {
+// BlobResolver resolves file metadata and chunk contents using Storage.
+type BlobResolver interface {
 	FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error)
 	ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error)
 	TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error)
 }
 
-func NewChunkResolver(storage stor.Storage) ChunkResolver {
-	return &chunkResolver{
+func NewBlobResolver(storage stor.Storage) BlobResolver {
+	return &blobResolver{
 		storage:  storage,
 		tocCache: make(map[digest.Digest]*estargzutil.JTOC),
 	}
 }
 
-type chunkResolver struct {
+type blobResolver struct {
 	storage   stor.Storage
 	mu        sync.Mutex
 	blobSizes map[digest.Digest]int64
 	tocCache  map[digest.Digest]*estargzutil.JTOC
 }
 
-func (r *chunkResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
+func (r *blobResolver) FileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	toc, err := r.loadTOC(ctx, blobDigest)
 	if err != nil {
 		return nil, err
@@ -62,7 +62,7 @@ func (r *chunkResolver) FileMetadata(ctx context.Context, blobDigest digest.Dige
 	return result, nil
 }
 
-func (r *chunkResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
+func (r *blobResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest, path string, chunk Chunk) ([]byte, error) {
 	reader, err := r.storage.ReadBlob(ctx, blobDigest, chunk.CompressedOffset, 0)
 	if err != nil {
 		return nil, stargzerrors.ErrDownloadFailed.WithCause(err)
@@ -93,7 +93,7 @@ func (r *chunkResolver) ReadChunk(ctx context.Context, blobDigest digest.Digest,
 	return buf, nil
 }
 
-func (r *chunkResolver) loadTOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
+func (r *blobResolver) loadTOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
 	r.mu.Lock()
 	if toc, ok := r.tocCache[blobDigest]; ok {
 		r.mu.Unlock()
@@ -159,11 +159,11 @@ func (r *chunkResolver) loadTOC(ctx context.Context, blobDigest digest.Digest) (
 	return toc, nil
 }
 
-func (r *chunkResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
+func (r *blobResolver) TOC(ctx context.Context, blobDigest digest.Digest) (*estargzutil.JTOC, error) {
 	return r.loadTOC(ctx, blobDigest)
 }
 
-func (r *chunkResolver) ensureBlobSizes(ctx context.Context) error {
+func (r *blobResolver) ensureBlobSizes(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
