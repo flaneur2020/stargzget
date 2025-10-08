@@ -19,7 +19,15 @@ type FileReader struct {
 
 var _ io.ReadSeekCloser = (*FileReader)(nil)
 
-func NewFileReader(chunks []Chunk, r io.ReadSeekCloser) *FileReader {
+func NewFileReader(jtoc *JTOC, fileName string, r io.ReadSeekCloser) (*FileReader, error) {
+	_, chunks, err := ChunksForFile(jtoc, fileName)
+	if err != nil {
+		return nil, err
+	}
+	return newFileReaderWithChunks(chunks, r), nil
+}
+
+func newFileReaderWithChunks(chunks []Chunk, r io.ReadSeekCloser) *FileReader {
 	var size int64
 	for _, ch := range chunks {
 		if end := ch.Offset + ch.Size; end > size {

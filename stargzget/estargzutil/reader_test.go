@@ -77,7 +77,7 @@ func buildTestFileReader(t *testing.T, content []byte, chunkSizes []int64) (*Fil
 	}
 
 	reader := &nopReadSeekCloser{Reader: bytes.NewReader(buf.Bytes())}
-	return NewFileReader(chunks, reader), func() {}
+	return newFileReaderWithChunks(chunks, reader), func() {}
 }
 
 func gzipCompress(t *testing.T, data []byte) []byte {
@@ -232,7 +232,7 @@ func TestFileReader_InnerOffset(t *testing.T) {
 		},
 	}
 
-	reader := NewFileReader(chunks, &nopReadSeekCloser{Reader: bytes.NewReader(buf.Bytes())})
+	reader := newFileReaderWithChunks(chunks, &nopReadSeekCloser{Reader: bytes.NewReader(buf.Bytes())})
 	defer reader.Close()
 
 	out := make([]byte, len(payload)-int(inner))
