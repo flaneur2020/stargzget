@@ -94,7 +94,7 @@ type Manifest struct {
 
 **TOC Download Process**:
 1. Send HEAD request to get blob size
-2. Calculate TOC offset using `estargz.OpenFooter()`
+2. Calculate TOC offset using the internal `estargzutil.OpenFooter()` helper
 3. Use Range request to fetch TOC section only
 4. Parse TOC as gzipped tar, extract `stargz.index.json`
 5. Unmarshal JSON to get file metadata
@@ -113,7 +113,7 @@ type imageAccessor struct {
     registry       string
     repository     string
     manifest       *Manifest
-    tocCache       map[string]*estargz.JTOC  // Caches TOCs
+    tocCache       map[string]*jtoc          // Caches TOCs
     authToken      string
     index          *ImageIndex
 }
@@ -291,7 +291,7 @@ User ← Download complete with stats
 **Solution**:
 - Download only the TOC (typically a few KB)
 - Fetch file content on-demand via HTTP range requests
-- Use estargz library to handle chunk-level lazy loading
+- Use the internal estargzutil package to handle TOC parsing and lazy chunk access
 
 **Benefits**:
 - Fast startup (no full image download)

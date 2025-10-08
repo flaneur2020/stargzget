@@ -19,7 +19,7 @@
 **Goal**: Get file list from a single blob
 
 **Completed**:
-- [x] Implement TOC download using estargz library
+- [x] Implement TOC download using estargzutil helpers
 - [x] Parse stargz index JSON to extract file entries (name, offset, size)
 - [x] Build file metadata map (path -> file info)
 - [x] **Validation**: Print all file paths in blob layers
@@ -35,7 +35,7 @@
 
 **Completed**:
 - [x] Implement file download using HTTP range requests
-- [x] Add gzip decompression using estargz library
+- [x] Add gzip decompression via estargzutil utilities
 - [x] Write decompressed data to target file path
 - [x] Support directory downloads with pattern matching
 - [x] Unified download interface with `DownloadJob`

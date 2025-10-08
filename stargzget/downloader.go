@@ -246,58 +246,41 @@ func (d *downloader) downloadSingleFile(ctx context.Context, job *DownloadJob, b
 		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
 	}
 
-	useChunked := metadata != nil &&
-		len(metadata.Chunks) > 1 &&
+	if metadata == nil {
+		return ErrDownloadFailed.WithDetail("path", job.Path).WithMessage("missing file metadata")
+	}
+
+	if len(metadata.Chunks) == 0 {
+		if progress != nil && job.Size == 0 {
+			mu.Lock()
+			progress(baseOffset, totalSize)
+			mu.Unlock()
+		}
+		return nil
+	}
+
+	useChunked := len(metadata.Chunks) > 1 &&
 		metadata.Size >= opts.SingleFileChunkThreshold &&
 		job.Size >= opts.SingleFileChunkThreshold
 
+	chunkWorkers := 1
 	if useChunked {
-		var maxChunkSize int64
-		for _, chunk := range metadata.Chunks {
-			if chunk.Size > maxChunkSize {
-				maxChunkSize = chunk.Size
-			}
+		chunkWorkers = opts.Concurrency
+		if chunkWorkers <= 0 {
+			chunkWorkers = 1
 		}
-		maxAllowedChunk := int64(int(^uint(0) >> 1))
-		if maxChunkSize > maxAllowedChunk {
-			useChunked = false
+		if chunkWorkers > len(metadata.Chunks) {
+			chunkWorkers = len(metadata.Chunks)
+		}
+		if chunkWorkers < 1 {
+			chunkWorkers = 1
 		}
 	}
 
-	if useChunked {
-		return d.downloadSingleFileChunked(ctx, job, metadata, outFile, baseOffset, totalSize, progress, mu, opts)
-	}
-
-	return d.downloadSingleFileSequential(ctx, job, outFile, baseOffset, totalSize, progress, mu)
+	return d.downloadFileChunks(ctx, job, metadata, outFile, baseOffset, totalSize, progress, mu, chunkWorkers)
 }
 
-func (d *downloader) downloadSingleFileSequential(ctx context.Context, job *DownloadJob, outFile *os.File, baseOffset int64, totalSize int64, progress ProgressCallback, mu *sync.Mutex) error {
-	fileReader, err := d.imageAccessor.OpenFile(ctx, job.Path, job.BlobDigest)
-	if err != nil {
-		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
-	}
-
-	readerToUse := io.Reader(fileReader)
-	if progress != nil {
-		readerToUse = &progressReader{
-			reader: fileReader,
-			total:  job.Size,
-			callback: func(current, total int64) {
-				mu.Lock()
-				progress(baseOffset+current, totalSize)
-				mu.Unlock()
-			},
-		}
-	}
-
-	if _, err := io.Copy(outFile, readerToUse); err != nil {
-		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
-	}
-
-	return nil
-}
-
-func (d *downloader) downloadSingleFileChunked(
+func (d *downloader) downloadFileChunks(
 	ctx context.Context,
 	job *DownloadJob,
 	metadata *FileMetadata,
@@ -306,35 +289,18 @@ func (d *downloader) downloadSingleFileChunked(
 	totalSize int64,
 	progress ProgressCallback,
 	mu *sync.Mutex,
-	opts *DownloadOptions,
+	workerCount int,
 ) error {
-	if metadata == nil || len(metadata.Chunks) == 0 {
-		return d.downloadSingleFileSequential(ctx, job, outFile, baseOffset, totalSize, progress, mu)
-	}
-
 	ctxChunk, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	reader, err := d.imageAccessor.OpenFile(ctxChunk, job.Path, job.BlobDigest)
-	if err != nil {
-		return ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err)
-	}
-
-	chunkConcurrency := opts.Concurrency
-	if chunkConcurrency <= 0 {
-		chunkConcurrency = 1
-	}
-	if chunkConcurrency > len(metadata.Chunks) {
-		chunkConcurrency = len(metadata.Chunks)
-	}
-	if chunkConcurrency < 1 {
-		chunkConcurrency = 1
-	}
 
 	chunkJobs := make(chan Chunk)
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 	var completed int64
+	if workerCount < 1 {
+		workerCount = 1
+	}
 
 	sendErr := func(err error) {
 		if err == nil {
@@ -346,7 +312,7 @@ func (d *downloader) downloadSingleFileChunked(
 		}
 	}
 
-	for i := 0; i < chunkConcurrency; i++ {
+	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -359,27 +325,27 @@ func (d *downloader) downloadSingleFileChunked(
 					return
 				}
 
-				buf := make([]byte, int(chunk.Size))
-				n, err := reader.ReadAt(buf, chunk.Offset)
-				if err != nil && !(err == io.EOF && int64(n) == chunk.Size) {
+				data, err := d.imageAccessor.ReadChunk(ctxChunk, job.Path, job.BlobDigest, chunk)
+				if err != nil {
 					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
 					cancel()
 					return
 				}
-				if int64(n) != chunk.Size {
+
+				if int64(len(data)) != chunk.Size {
 					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(io.ErrUnexpectedEOF))
 					cancel()
 					return
 				}
 
-				if _, err := outFile.WriteAt(buf[:n], chunk.Offset); err != nil {
+				if _, err := outFile.WriteAt(data, chunk.Offset); err != nil {
 					sendErr(ErrDownloadFailed.WithDetail("path", job.Path).WithCause(err))
 					cancel()
 					return
 				}
 
 				if progress != nil {
-					newProgress := atomic.AddInt64(&completed, int64(n))
+					newProgress := atomic.AddInt64(&completed, int64(len(data)))
 					mu.Lock()
 					progress(baseOffset+newProgress, totalSize)
 					mu.Unlock()
@@ -415,21 +381,4 @@ chunkLoop:
 	}
 
 	return nil
-}
-
-// progressReader wraps an io.Reader to report download progress
-type progressReader struct {
-	reader   io.Reader
-	total    int64
-	current  int64
-	callback ProgressCallback
-}
-
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.reader.Read(p)
-	pr.current += int64(n)
-	if pr.callback != nil {
-		pr.callback(pr.current, pr.total)
-	}
-	return n, err
 }

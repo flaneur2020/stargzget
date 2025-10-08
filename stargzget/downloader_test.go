@@ -23,14 +23,6 @@ func (m *mockImageAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error)
 	return nil, nil
 }
 
-func (m *mockImageAccessor) OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error) {
-	content, ok := m.files[path]
-	if !ok {
-		return nil, io.EOF
-	}
-	return io.NewSectionReader(bytes.NewReader(content), 0, int64(len(content))), nil
-}
-
 func (m *mockImageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
@@ -64,6 +56,23 @@ func (m *mockImageAccessor) GetFileMetadata(ctx context.Context, blobDigest dige
 		Size:   size,
 		Chunks: chunks,
 	}, nil
+}
+
+func (m *mockImageAccessor) ReadChunk(ctx context.Context, path string, blobDigest digest.Digest, chunk Chunk) ([]byte, error) {
+	content, ok := m.files[path]
+	if !ok {
+		return nil, ErrFileNotFound.WithDetail("path", path)
+	}
+
+	start := int(chunk.Offset)
+	end := start + int(chunk.Size)
+	if start < 0 || end > len(content) {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	buf := make([]byte, int(chunk.Size))
+	copy(buf, content[start:end])
+	return buf, nil
 }
 
 func (m *mockImageAccessor) WithCredential(username, password string) ImageAccessor {
@@ -305,33 +314,6 @@ func (m *mockFailingAccessor) ImageIndex(ctx context.Context) (*ImageIndex, erro
 	return nil, nil
 }
 
-func (m *mockFailingAccessor) OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.attemptCount == nil {
-		m.attemptCount = make(map[string]int)
-	}
-
-	// Increment attempt count
-	m.attemptCount[path]++
-
-	// Check if we should fail
-	if failTimes, exists := m.failCount[path]; exists {
-		if m.attemptCount[path] <= failTimes {
-			// Simulate a failure
-			return nil, io.ErrUnexpectedEOF
-		}
-	}
-
-	// Success - return file content
-	content, ok := m.files[path]
-	if !ok {
-		return nil, io.EOF
-	}
-	return io.NewSectionReader(bytes.NewReader(content), 0, int64(len(content))), nil
-}
-
 func (m *mockFailingAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error) {
 	content, ok := m.files[path]
 	if !ok {
@@ -348,6 +330,38 @@ func (m *mockFailingAccessor) GetFileMetadata(ctx context.Context, blobDigest di
 		Size:   size,
 		Chunks: chunks,
 	}, nil
+}
+
+func (m *mockFailingAccessor) ReadChunk(ctx context.Context, path string, blobDigest digest.Digest, chunk Chunk) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.attemptCount == nil {
+		m.attemptCount = make(map[string]int)
+	}
+
+	m.attemptCount[path]++
+
+	if failTimes, exists := m.failCount[path]; exists {
+		if m.attemptCount[path] <= failTimes {
+			return nil, io.ErrUnexpectedEOF
+		}
+	}
+
+	content, ok := m.files[path]
+	if !ok {
+		return nil, io.EOF
+	}
+
+	start := int(chunk.Offset)
+	end := start + int(chunk.Size)
+	if start < 0 || end > len(content) {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	buf := make([]byte, int(chunk.Size))
+	copy(buf, content[start:end])
+	return buf, nil
 }
 
 func (m *mockFailingAccessor) WithCredential(username, password string) ImageAccessor {

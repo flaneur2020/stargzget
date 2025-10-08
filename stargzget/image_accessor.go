@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/containerd/stargz-snapshotter/estargz"
+	"github.com/flaneur2020/stargz-get/estargzutil"
 	"github.com/flaneur2020/stargz-get/logger"
 	"github.com/opencontainers/go-digest"
 )
@@ -168,9 +168,8 @@ type ImageAccessor interface {
 	// GetFileMetadata returns metadata (size and chunk layout) for a file
 	GetFileMetadata(ctx context.Context, blobDigest digest.Digest, path string) (*FileMetadata, error)
 
-	// OpenFile opens a file from the image
-	// blobDigest is required and specifies which blob to open the file from
-	OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error)
+	// ReadChunk fetches and decompresses a single chunk of file data
+	ReadChunk(ctx context.Context, path string, blobDigest digest.Digest, chunk Chunk) ([]byte, error)
 
 	// WithCredential returns a new ImageAccessor with the provided credentials
 	WithCredential(username, password string) ImageAccessor
@@ -184,8 +183,27 @@ type FileMetadata struct {
 type Chunk struct {
 	Offset           int64 // Uncompressed offset within the file
 	Size             int64 // Uncompressed size of this chunk
-	CompressedOffset int64 // Offset within the blob for the compressed chunk
-	CompressedSize   int64 // Size in the blob (compressed)
+	CompressedOffset int64 // Offset within the blob where this chunk's gzip stream begins
+	InnerOffset      int64 // Uncompressed offset within the gzip member to reach this chunk
+}
+
+type tocEntry struct {
+	Name          string            `json:"name"`
+	Type          string            `json:"type"`
+	Size          int64             `json:"size,omitempty"`
+	Offset        int64             `json:"offset,omitempty"`
+	ChunkOffset   int64             `json:"chunkOffset,omitempty"`
+	ChunkSize     int64             `json:"chunkSize,omitempty"`
+	InnerOffset   int64             `json:"innerOffset,omitempty"`
+	ChunkDigest   string            `json:"chunkDigest,omitempty"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
+	nextOffset    int64
+	chunkTopIndex int
+}
+
+type jtoc struct {
+	Version int         `json:"version"`
+	Entries []*tocEntry `json:"entries"`
 }
 
 type imageAccessor struct {
@@ -194,8 +212,8 @@ type imageAccessor struct {
 	registry       string
 	repository     string
 	manifest       *Manifest
-	// Cache: digest -> JTOC
-	tocCache map[string]*estargz.JTOC
+	// Cache: digest -> TOC
+	tocCache map[string]*jtoc
 	// Auth token cache
 	authToken string
 	// Cached index
@@ -212,7 +230,7 @@ func NewImageAccessor(registryClient RegistryClient, registry, repository string
 		registry:       registry,
 		repository:     repository,
 		manifest:       manifest,
-		tocCache:       make(map[string]*estargz.JTOC),
+		tocCache:       make(map[string]*jtoc),
 	}
 }
 
@@ -300,8 +318,8 @@ func (i *imageAccessor) getAuthToken(ctx context.Context, wwwAuthenticate string
 	return token, nil
 }
 
-// downloadTOC downloads the stargz TOC using estargz library
-func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*estargz.JTOC, error) {
+// downloadTOC downloads the stargz TOC.
+func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*jtoc, error) {
 	// Check cache
 	if toc, ok := i.tocCache[blobDigest]; ok {
 		logger.Debug("TOC cache hit for blob: %s", blobDigest[:12])
@@ -336,7 +354,7 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 
 	// Get TOC offset using OpenFooter
 	sr := io.NewSectionReader(blobReader, 0, size)
-	tocOffset, _, err := estargz.OpenFooter(sr)
+	tocOffset, _, err := estargzutil.OpenFooter(sr)
 	if err != nil {
 		logger.Error("Failed to read stargz footer: %v", err)
 		return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
@@ -371,13 +389,13 @@ func (i *imageAccessor) downloadTOC(ctx context.Context, blobDigest string) (*es
 		}
 
 		// Look for stargz.index.json
-		if header.Name == "stargz.index.json" {
+		if header.Name == estargzutil.TOCTarName {
 			tocJSONBytes, err := io.ReadAll(tarReader)
 			if err != nil {
 				return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 			}
 
-			var toc estargz.JTOC
+			var toc jtoc
 			if err := json.Unmarshal(tocJSONBytes, &toc); err != nil {
 				return nil, ErrTOCDownload.WithDetail("blobDigest", blobDigest).WithCause(err)
 			}
@@ -403,6 +421,16 @@ type httpBlobReader struct {
 	imageAccessor *imageAccessor
 }
 
+func (r *httpBlobReader) setAuthHeaders(req *http.Request) {
+	if *r.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+*r.authToken)
+	}
+
+	if r.imageAccessor.username != "" && r.imageAccessor.password != "" {
+		req.SetBasicAuth(r.imageAccessor.username, r.imageAccessor.password)
+	}
+}
+
 func (r *httpBlobReader) getSize() (int64, error) {
 	if r.sizeInit {
 		return r.size, nil
@@ -413,14 +441,7 @@ func (r *httpBlobReader) getSize() (int64, error) {
 		return -1, err
 	}
 
-	if *r.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+*r.authToken)
-	}
-
-	// Add Basic Auth if credentials are provided
-	if r.imageAccessor.username != "" && r.imageAccessor.password != "" {
-		req.SetBasicAuth(r.imageAccessor.username, r.imageAccessor.password)
-	}
+	r.setAuthHeaders(req)
 
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -441,13 +462,7 @@ func (r *httpBlobReader) getSize() (int64, error) {
 		if err != nil {
 			return -1, err
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-
-		// Add Basic Auth if credentials are provided
-		if r.imageAccessor.username != "" && r.imageAccessor.password != "" {
-			req.SetBasicAuth(r.imageAccessor.username, r.imageAccessor.password)
-		}
-
+		r.setAuthHeaders(req)
 		resp, err = r.client.Do(req)
 		if err != nil {
 			return -1, err
@@ -476,15 +491,7 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (n int, err error) {
 		return 0, err
 	}
 	req.Header.Set("Range", rangeHeader)
-
-	if *r.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+*r.authToken)
-	}
-
-	// Add Basic Auth if credentials are provided
-	if r.imageAccessor.username != "" && r.imageAccessor.password != "" {
-		req.SetBasicAuth(r.imageAccessor.username, r.imageAccessor.password)
-	}
+	r.setAuthHeaders(req)
 
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -497,6 +504,46 @@ func (r *httpBlobReader) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 
 	return io.ReadFull(resp.Body, p)
+}
+
+func (r *httpBlobReader) openRangeReader(off int64) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(r.ctx, "GET", r.url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", off))
+	r.setAuthHeaders(req)
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		resp.Body.Close()
+		token, err := r.imageAccessor.getAuthToken(r.ctx, wwwAuth)
+		if err != nil {
+			return nil, fmt.Errorf("auth failed: %w", err)
+		}
+		req, err = http.NewRequestWithContext(r.ctx, "GET", r.url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", off))
+		r.setAuthHeaders(req)
+		resp, err = r.client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("range request failed: %d", resp.StatusCode)
+	}
+
+	return resp.Body, nil
 }
 
 // listFiles is a private helper method for internal use
@@ -546,7 +593,7 @@ func (i *imageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.D
 				Offset:           entry.ChunkOffset,
 				Size:             chunkSize,
 				CompressedOffset: entry.Offset,
-				CompressedSize:   entry.ChunkSize,
+				InnerOffset:      entry.InnerOffset,
 			})
 		case "chunk":
 			found = true
@@ -558,7 +605,7 @@ func (i *imageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.D
 				Offset:           entry.ChunkOffset,
 				Size:             chunkSize,
 				CompressedOffset: entry.Offset,
-				CompressedSize:   entry.ChunkSize,
+				InnerOffset:      entry.InnerOffset,
 			})
 		}
 	}
@@ -568,6 +615,9 @@ func (i *imageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.D
 	}
 
 	sort.Slice(chunks, func(i, j int) bool {
+		if chunks[i].Offset == chunks[j].Offset {
+			return chunks[i].InnerOffset < chunks[j].InnerOffset
+		}
 		return chunks[i].Offset < chunks[j].Offset
 	})
 
@@ -577,10 +627,14 @@ func (i *imageAccessor) GetFileMetadata(ctx context.Context, blobDigest digest.D
 			if idx+1 < len(chunks) {
 				nextOffset = chunks[idx+1].Offset
 			}
-			chunks[idx].Size = nextOffset - chunks[idx].Offset
-			if chunks[idx].Size < 0 {
-				chunks[idx].Size = 0
+			size := nextOffset - chunks[idx].Offset
+			if size <= 0 {
+				size = fileSize - chunks[idx].Offset
 			}
+			if size < 0 {
+				size = 0
+			}
+			chunks[idx].Size = size
 		}
 	}
 
@@ -648,18 +702,18 @@ func (i *imageAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
 	return index, nil
 }
 
-func (i *imageAccessor) OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error) {
-	// Note: If blobDigest is empty, the caller should use ImageIndex to find the blob
-	// This method requires a valid blobDigest
-	if blobDigest.String() == "" {
-		return nil, fmt.Errorf("blobDigest is required for OpenFile")
+func (i *imageAccessor) ReadChunk(ctx context.Context, path string, blobDigest digest.Digest, chunk Chunk) ([]byte, error) {
+	if chunk.Size == 0 {
+		return []byte{}, nil
 	}
 
-	// Construct blob URL
+	if blobDigest.String() == "" {
+		return nil, fmt.Errorf("blobDigest is required for chunk reads")
+	}
+
 	scheme := getScheme(i.registry)
 	blobURL := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", scheme, i.registry, i.repository, blobDigest.String())
 
-	// Create a blob reader
 	blobReader := &httpBlobReader{
 		client:        i.httpClient,
 		url:           blobURL,
@@ -668,24 +722,32 @@ func (i *imageAccessor) OpenFile(ctx context.Context, path string, blobDigest di
 		imageAccessor: i,
 	}
 
-	// Get blob size
-	size, err := blobReader.getSize()
+	rangeReader, err := blobReader.openRangeReader(chunk.CompressedOffset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get blob size: %w", err)
+		return nil, err
+	}
+	defer rangeReader.Close()
+
+	gz, err := gzip.NewReader(rangeReader)
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+
+	if chunk.InnerOffset > 0 {
+		if _, err := io.CopyN(io.Discard, gz, chunk.InnerOffset); err != nil {
+			return nil, err
+		}
 	}
 
-	// Open the stargz blob
-	sr := io.NewSectionReader(blobReader, 0, size)
-	reader, err := estargz.Open(sr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open stargz: %w", err)
+	buf := make([]byte, chunk.Size)
+	n, err := io.ReadFull(gz, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	if int64(n) != chunk.Size {
+		return nil, io.ErrUnexpectedEOF
 	}
 
-	// Open the specific file
-	fileReader, err := reader.OpenFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
-	}
-
-	return fileReader, nil
+	return buf, nil
 }

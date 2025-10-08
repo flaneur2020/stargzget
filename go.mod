@@ -3,7 +3,6 @@ module github.com/flaneur2020/stargz-get
 go 1.24.5
 
 require (
-	github.com/containerd/stargz-snapshotter/estargz v0.17.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
