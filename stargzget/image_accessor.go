@@ -83,46 +83,18 @@ func (idx *ImageIndex) FindFile(path string, blobDigest digest.Digest) (*FileInf
 // If blobDigest is provided (not empty), only returns files from that blob
 // If blobDigest is empty, returns files from all layers (later layers override earlier ones)
 func (idx *ImageIndex) FilterFiles(pathPattern string, blobDigest digest.Digest) []*FileInfo {
-	var results []*FileInfo
-
 	// Normalize path pattern
 	if pathPattern == "." || pathPattern == "/" || pathPattern == "" {
 		pathPattern = "" // Match all files
 	}
 
+	matcher := newPathMatcher(pathPattern)
+	var results []*FileInfo
+
 	// If no blob digest specified, search in the global file index (later layers override earlier ones)
 	if blobDigest.String() == "" {
-		for filePath, fileInfo := range idx.files {
-			matched := false
-
-			if pathPattern == "" {
-				// Match all files
-				matched = true
-			} else {
-				// Normalize file path for comparison
-				normalizedFile := filePath
-				if !strings.HasPrefix(normalizedFile, "/") {
-					normalizedFile = "/" + normalizedFile
-				}
-
-				normalizedPattern := pathPattern
-				if !strings.HasPrefix(normalizedPattern, "/") {
-					normalizedPattern = "/" + normalizedPattern
-				}
-
-				// Check if it's a directory pattern (ends with /)
-				if strings.HasSuffix(pathPattern, "/") {
-					// Directory match - check if file is under this directory
-					matched = strings.HasPrefix(normalizedFile, normalizedPattern)
-				} else {
-					// Could be either a file or directory
-					// Match exact file or files under directory
-					matched = normalizedFile == normalizedPattern ||
-						strings.HasPrefix(normalizedFile, normalizedPattern+"/")
-				}
-			}
-
-			if matched {
+		for _, fileInfo := range idx.files {
+			if matcher.matches(fileInfo.Path) {
 				results = append(results, fileInfo)
 			}
 		}
@@ -133,36 +105,7 @@ func (idx *ImageIndex) FilterFiles(pathPattern string, blobDigest digest.Digest)
 	for _, layer := range idx.Layers {
 		if layer.BlobDigest == blobDigest {
 			for _, filePath := range layer.Files {
-				matched := false
-
-				if pathPattern == "" {
-					// Match all files
-					matched = true
-				} else {
-					// Normalize file path for comparison
-					normalizedFile := filePath
-					if !strings.HasPrefix(normalizedFile, "/") {
-						normalizedFile = "/" + normalizedFile
-					}
-
-					normalizedPattern := pathPattern
-					if !strings.HasPrefix(normalizedPattern, "/") {
-						normalizedPattern = "/" + normalizedPattern
-					}
-
-					// Check if it's a directory pattern (ends with /)
-					if strings.HasSuffix(pathPattern, "/") {
-						// Directory match - check if file is under this directory
-						matched = strings.HasPrefix(normalizedFile, normalizedPattern)
-					} else {
-						// Could be either a file or directory
-						// Match exact file or files under directory
-						matched = normalizedFile == normalizedPattern ||
-							strings.HasPrefix(normalizedFile, normalizedPattern+"/")
-					}
-				}
-
-				if matched {
+				if matcher.matches(filePath) {
 					size := layer.FileSizes[filePath]
 					results = append(results, &FileInfo{
 						Path:       filePath,
@@ -176,6 +119,45 @@ func (idx *ImageIndex) FilterFiles(pathPattern string, blobDigest digest.Digest)
 	}
 
 	return results
+}
+
+// pathMatcher encapsulates path pattern matching logic for FilterFiles
+type pathMatcher struct {
+	matchAll  bool
+	pattern   string
+	dirPrefix bool
+}
+
+func newPathMatcher(pattern string) pathMatcher {
+	if pattern == "" {
+		return pathMatcher{matchAll: true}
+	}
+
+	dirPrefix := strings.HasSuffix(pattern, "/")
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/" + pattern
+	}
+
+	return pathMatcher{
+		pattern:   pattern,
+		dirPrefix: dirPrefix,
+	}
+}
+
+func (m pathMatcher) matches(path string) bool {
+	if m.matchAll {
+		return true
+	}
+
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	if m.dirPrefix {
+		return strings.HasPrefix(path, m.pattern)
+	}
+
+	return path == m.pattern || strings.HasPrefix(path, m.pattern+"/")
 }
 
 type ImageAccessor interface {
@@ -613,8 +595,6 @@ func (i *imageAccessor) ImageIndex(ctx context.Context) (*ImageIndex, error) {
 
 	return index, nil
 }
-
-// buildIndex is deprecated and removed - use ImageIndex() instead
 
 func (i *imageAccessor) OpenFile(ctx context.Context, path string, blobDigest digest.Digest) (*io.SectionReader, error) {
 	// Note: If blobDigest is empty, the caller should use ImageIndex to find the blob
