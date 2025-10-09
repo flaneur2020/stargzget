@@ -81,6 +81,7 @@ func (c *RemoteRegistryStorage) NewStorage(registry, repository string, manifest
 		manifest:   manifest,
 		username:   c.username,
 		password:   c.password,
+		authToken:  c.authToken,
 	}
 }
 
@@ -239,7 +240,6 @@ func (c *RemoteRegistryStorage) getAuthToken(ctx context.Context, registry, repo
 	}
 	defer resp.Body.Close()
 
-	logger.Debug("Token request status: %d", resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return "", stargzerrors.ErrAuthFailed.WithCause(fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body)))
@@ -257,11 +257,7 @@ func (c *RemoteRegistryStorage) getAuthToken(ctx context.Context, registry, repo
 	if token == "" {
 		token = authResp.AccessToken
 	}
-	if len(token) > 50 {
-		logger.Debug("Received token (first 50 chars): %s...", token[:50])
-	} else {
-		logger.Debug("Received token: %s", token)
-	}
+	logger.Debug("Received auth token (length: %d)", len(token))
 	return token, nil
 }
 
@@ -301,6 +297,7 @@ func (s *registryBlobStorage) ReadBlob(ctx context.Context, blobDigest digest.Di
 		return nil, fmt.Errorf("offset must be non-negative")
 	}
 
+	logger.Debug("ReadBlob: digest=%s, authToken length=%d, username=%s", blobDigest.String()[:min(20, len(blobDigest.String()))], len(s.authToken), s.username)
 	url := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", getScheme(s.registry), s.registry, s.repository, blobDigest.String())
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -312,21 +309,36 @@ func (s *registryBlobStorage) ReadBlob(ctx context.Context, blobDigest digest.Di
 	} else {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
-	s.applyAuth(req)
+	// Don't send credentials on first request - let the server tell us what auth method to use
+	// s.applyAuth(req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
+	logger.Debug("ReadBlob: first request status=%d", resp.StatusCode)
 	if resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		token, err := s.client.getAuthToken(ctx, s.registry, s.repository, wwwAuth)
-		if err != nil {
-			return nil, fmt.Errorf("auth failed: %w", err)
+		logger.Debug("ReadBlob: got 401, WWW-Authenticate=%s", wwwAuth[:min(50, len(wwwAuth))])
+
+		// Check if it's Bearer token auth or Basic auth
+		if strings.HasPrefix(wwwAuth, "Bearer ") {
+			logger.Debug("ReadBlob: using Bearer auth, getting token...")
+			token, err := s.client.getAuthToken(ctx, s.registry, s.repository, wwwAuth)
+			if err != nil {
+				return nil, fmt.Errorf("auth failed: %w", err)
+			}
+			s.authToken = token
+			logger.Debug("ReadBlob: got token, length=%d, saved to s.authToken", len(token))
+		} else if strings.HasPrefix(wwwAuth, "Basic ") {
+			if s.username == "" || s.password == "" {
+				return nil, fmt.Errorf("registry requires basic auth but no credentials provided")
+			}
+		} else {
+			return nil, fmt.Errorf("unsupported auth scheme: %s", wwwAuth)
 		}
-		s.authToken = token
 
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
@@ -343,6 +355,7 @@ func (s *registryBlobStorage) ReadBlob(ctx context.Context, blobDigest digest.Di
 		if err != nil {
 			return nil, err
 		}
+		logger.Debug("ReadBlob: second request status=%d", resp.StatusCode)
 	}
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
@@ -357,9 +370,12 @@ func (s *registryBlobStorage) ReadBlob(ctx context.Context, blobDigest digest.Di
 func (s *registryBlobStorage) applyAuth(req *http.Request) {
 	if s.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.authToken)
-	}
-	if s.username != "" && s.password != "" {
+		logger.Debug("registryBlobStorage.applyAuth: applied Bearer token, length=%d", len(s.authToken))
+	} else if s.username != "" && s.password != "" {
 		req.SetBasicAuth(s.username, s.password)
+		logger.Debug("registryBlobStorage.applyAuth: applied Basic auth for user=%s", s.username)
+	} else {
+		logger.Debug("registryBlobStorage.applyAuth: NO auth applied (no token, no username)")
 	}
 }
 
