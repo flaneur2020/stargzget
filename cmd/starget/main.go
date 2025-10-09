@@ -21,6 +21,7 @@ var (
 	concurrency int
 	verbose     bool
 	debug       bool
+	insecure    bool
 )
 
 func main() {
@@ -42,6 +43,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&credential, "credential", "", "Registry credential in format USER:PASSWORD")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable verbose logging (INFO level)")
 	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "Enable debug logging (DEBUG level)")
+	rootCmd.PersistentFlags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS certificate verification (insecure)")
 
 	// info command
 	infoCmd := &cobra.Command{
@@ -106,7 +108,7 @@ func parseCredential(cred string) (string, string, error) {
 func runInfo(cmd *cobra.Command, args []string) {
 	imageRef := args[0]
 
-	client := stor.NewRemoteRegistryStorage()
+	client := stor.NewRemoteRegistryStorage(insecure)
 
 	// Apply credentials if provided
 	if credential != "" {
@@ -145,7 +147,7 @@ func runLs(cmd *cobra.Command, args []string) {
 	}
 
 	// Get manifest first
-	registryClient := stor.NewRemoteRegistryStorage()
+	registryClient := stor.NewRemoteRegistryStorage(insecure)
 
 	// Apply credentials if provided
 	if credential != "" {
@@ -243,7 +245,7 @@ func runGet(cmd *cobra.Command, args []string) {
 	}
 
 	// Get manifest first
-	registryClient := stor.NewRemoteRegistryStorage()
+	registryClient := stor.NewRemoteRegistryStorage(insecure)
 
 	// Apply credentials if provided
 	if credential != "" {

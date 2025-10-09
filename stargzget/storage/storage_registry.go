@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,13 @@ import (
 	"github.com/flaneur2020/stargz-get/stargzget/logger"
 	"github.com/opencontainers/go-digest"
 )
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // RemoteRegistryStorage coordinates manifest fetching and blob access against an OCI registry.
 type RemoteRegistryStorage struct {
@@ -45,8 +53,14 @@ type Layer struct {
 }
 
 // NewRemoteRegistryStorage creates a registry-backed storage helper.
-func NewRemoteRegistryStorage() *RemoteRegistryStorage {
-	return &RemoteRegistryStorage{httpClient: &http.Client{}}
+func NewRemoteRegistryStorage(insecure bool) *RemoteRegistryStorage {
+	client := &http.Client{}
+	if insecure {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
+	return &RemoteRegistryStorage{httpClient: client}
 }
 
 func (c *RemoteRegistryStorage) WithCredential(username, password string) *RemoteRegistryStorage {
@@ -90,7 +104,8 @@ func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string
 	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
 	req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
 	req.Header.Add("Accept", "application/vnd.oci.image.index.v1+json")
-	c.applyAuth(req)
+	// Don't send credentials on first request - let the server tell us what auth method to use
+	// c.applyAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -101,12 +116,25 @@ func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		token, err := c.getAuthToken(ctx, registry, repository, wwwAuth)
-		if err != nil {
-			logger.Error("Failed to get auth token: %v", err)
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
+
+		// Check if it's Bearer token auth or Basic auth
+		if strings.HasPrefix(wwwAuth, "Bearer ") {
+			// Docker/OCI registry with token auth
+			token, err := c.getAuthToken(ctx, registry, repository, wwwAuth)
+			if err != nil {
+				logger.Error("Failed to get auth token: %v", err)
+				return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
+			}
+			c.authToken = token
+		} else if strings.HasPrefix(wwwAuth, "Basic ") {
+			// Harbor or other registries using Basic auth
+			if c.username == "" || c.password == "" {
+				return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("registry requires basic auth but no credentials provided"))
+			}
+			logger.Info("Using Basic authentication for registry")
+		} else {
+			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("unsupported auth scheme: %s", wwwAuth))
 		}
-		c.authToken = token
 
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
@@ -211,6 +239,7 @@ func (c *RemoteRegistryStorage) getAuthToken(ctx context.Context, registry, repo
 	}
 	defer resp.Body.Close()
 
+	logger.Debug("Token request status: %d", resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return "", stargzerrors.ErrAuthFailed.WithCause(fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body)))
@@ -224,10 +253,16 @@ func (c *RemoteRegistryStorage) getAuthToken(ctx context.Context, registry, repo
 		return "", stargzerrors.ErrAuthFailed.WithCause(err)
 	}
 
-	if authResp.Token != "" {
-		return authResp.Token, nil
+	token := authResp.Token
+	if token == "" {
+		token = authResp.AccessToken
 	}
-	return authResp.AccessToken, nil
+	if len(token) > 50 {
+		logger.Debug("Received token (first 50 chars): %s...", token[:50])
+	} else {
+		logger.Debug("Received token: %s", token)
+	}
+	return token, nil
 }
 
 type registryBlobStorage struct {
