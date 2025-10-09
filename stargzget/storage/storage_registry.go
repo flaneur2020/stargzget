@@ -18,6 +18,7 @@ type RemoteRegistryStorage struct {
 	httpClient *http.Client
 	username   string
 	password   string
+	authToken  string
 }
 
 // Manifest represents an OCI image manifest.
@@ -53,6 +54,7 @@ func (c *RemoteRegistryStorage) WithCredential(username, password string) *Remot
 		httpClient: c.httpClient,
 		username:   username,
 		password:   password,
+		authToken:  c.authToken,
 	}
 }
 
@@ -104,6 +106,7 @@ func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string
 			logger.Error("Failed to get auth token: %v", err)
 			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
 		}
+		c.authToken = token
 
 		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
@@ -112,7 +115,6 @@ func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string
 		req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
 		req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
 		req.Header.Add("Accept", "application/vnd.oci.image.index.v1+json")
-		req.Header.Set("Authorization", "Bearer "+token)
 		c.applyAuth(req)
 
 		resp, err = c.httpClient.Do(req)
@@ -166,7 +168,9 @@ func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string
 }
 
 func (c *RemoteRegistryStorage) applyAuth(req *http.Request) {
-	if c.username != "" && c.password != "" {
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	} else if c.username != "" && c.password != "" {
 		req.SetBasicAuth(c.username, c.password)
 	}
 }
@@ -199,6 +203,7 @@ func (c *RemoteRegistryStorage) getAuthToken(ctx context.Context, registry, repo
 	if err != nil {
 		return "", stargzerrors.ErrAuthFailed.WithCause(err)
 	}
+	c.applyAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
