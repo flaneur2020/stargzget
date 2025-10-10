@@ -262,3 +262,369 @@ func min(a, b int64) int64 {
 	}
 	return b
 }
+
+// TestFileReader_ReadFullFile tests reading entire files in one go
+func TestFileReader_ReadFullFile(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000001")
+	defer cleanup()
+
+	// Test with bin/dash
+	reader, err := NewFileReader(toc, "bin/dash", r)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	defer reader.Close()
+
+	// Get expected file size from TOC
+	fileEntries := toc.FileEntries()
+	dashEntry := fileEntries["bin/dash"]
+
+	// Read entire file
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("failed to read all: %v", err)
+	}
+
+	if int64(len(data)) != dashEntry.Size {
+		t.Errorf("read %d bytes, expected %d", len(data), dashEntry.Size)
+	}
+
+	t.Logf("Successfully read entire file bin/dash: %d bytes", len(data))
+}
+
+// TestFileReader_PartialReads tests reading file in small chunks
+func TestFileReader_PartialReads(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000001")
+	defer cleanup()
+
+	reader, err := NewFileReader(toc, "bin/dash", r)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	defer reader.Close()
+
+	fileEntries := toc.FileEntries()
+	dashEntry := fileEntries["bin/dash"]
+
+	// Read in 1KB chunks
+	var totalRead int64
+	buf := make([]byte, 1024)
+	for {
+		n, err := reader.Read(buf)
+		totalRead += int64(n)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read error: %v", err)
+		}
+	}
+
+	if totalRead != dashEntry.Size {
+		t.Errorf("read %d bytes in chunks, expected %d", totalRead, dashEntry.Size)
+	}
+
+	t.Logf("Successfully read file in chunks: %d bytes total", totalRead)
+}
+
+// TestFileReader_SeekAndRead tests seeking to various positions and reading
+func TestFileReader_SeekAndRead(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000001")
+	defer cleanup()
+
+	reader, err := NewFileReader(toc, "lib/x86_64-linux-gnu/libc-2.24.so", r)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	defer reader.Close()
+
+	fileEntries := toc.FileEntries()
+	fileEntry := fileEntries["lib/x86_64-linux-gnu/libc-2.24.so"]
+
+	tests := []struct {
+		name       string
+		offset     int64
+		whence     int
+		want       int64
+		resetFirst bool // whether to reset to start before seek
+	}{
+		{"seek to start", 0, io.SeekStart, 0, false},
+		{"seek to 100", 100, io.SeekStart, 100, false},
+		{"seek forward 50", 50, io.SeekCurrent, 150, true}, // reset first, then seek to 100, then seek forward 50
+		{"seek to end", 0, io.SeekEnd, fileEntry.Size, false},
+		{"seek back 100 from end", -100, io.SeekEnd, fileEntry.Size - 100, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset position if needed
+			if tt.resetFirst {
+				if _, err := reader.Seek(100, io.SeekStart); err != nil {
+					t.Fatalf("Reset seek failed: %v", err)
+				}
+			}
+
+			pos, err := reader.Seek(tt.offset, tt.whence)
+			if err != nil {
+				t.Fatalf("Seek failed: %v", err)
+			}
+			if pos != tt.want {
+				t.Errorf("Seek position = %d, want %d", pos, tt.want)
+			}
+
+			// Try reading a bit
+			if pos < fileEntry.Size {
+				buf := make([]byte, 10)
+				n, err := reader.Read(buf)
+				if err != nil && err != io.EOF {
+					t.Errorf("Read after seek failed: %v", err)
+				}
+				if n > 0 {
+					t.Logf("Read %d bytes at position %d", n, pos)
+				}
+			}
+		})
+	}
+}
+
+// TestFileReader_MultipleFiles tests reading multiple files from same blob
+func TestFileReader_MultipleFiles(t *testing.T) {
+	tests := []struct {
+		filename string
+		files    []string
+	}{
+		{
+			"000001",
+			[]string{"bin/dash", "lib/x86_64-linux-gnu/libc-2.24.so", "bin/cat"},
+		},
+		{
+			"000002",
+			[]string{"etc/ca-certificates.conf", "etc/gss/mech.d/README"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			toc, _, cleanup := loadTestDataLayer(t, tt.filename)
+			defer cleanup()
+
+			fileEntries := toc.FileEntries()
+
+			for _, file := range tt.files {
+				entry, ok := fileEntries[file]
+				if !ok {
+					t.Logf("Skipping %s (not in TOC)", file)
+					continue
+				}
+
+				// Open a new file handle for each reader
+				filePath := filepath.Join("../../testdata", tt.filename)
+				f, err := os.Open(filePath)
+				if err != nil {
+					t.Fatalf("failed to open file: %v", err)
+				}
+
+				reader, err := NewFileReader(toc, file, &fileReadSeekCloser{f})
+				if err != nil {
+					f.Close()
+					t.Fatalf("failed to create reader for %s: %v", file, err)
+				}
+
+				data, err := io.ReadAll(reader)
+				reader.Close()
+
+				if err != nil {
+					t.Errorf("failed to read %s: %v", file, err)
+					continue
+				}
+
+				if int64(len(data)) != entry.Size {
+					t.Errorf("%s: read %d bytes, expected %d", file, len(data), entry.Size)
+				} else {
+					t.Logf("Successfully read %s: %d bytes", file, len(data))
+				}
+			}
+		})
+	}
+}
+
+// TestFileReader_EmptyFile tests reading empty files
+func TestFileReader_EmptyFile(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000002")
+	defer cleanup()
+
+	// Find an empty file
+	var emptyFile string
+	for _, entry := range toc.Entries {
+		if entry.Type == "reg" && entry.Size == 0 {
+			emptyFile = entry.Name
+			break
+		}
+	}
+
+	if emptyFile == "" {
+		t.Skip("no empty files in testdata")
+	}
+
+	reader, err := NewFileReader(toc, emptyFile, r)
+	if err != nil {
+		t.Fatalf("failed to create reader for empty file: %v", err)
+	}
+	defer reader.Close()
+
+	// Reading should immediately return EOF
+	buf := make([]byte, 10)
+	n, err := reader.Read(buf)
+	if err != io.EOF {
+		t.Errorf("expected EOF, got %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 bytes, got %d", n)
+	}
+}
+
+// TestFileReader_SmallFile tests reading very small files (< 100 bytes)
+func TestFileReader_SmallFile(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000002")
+	defer cleanup()
+
+	// .no.prefetch.landmark is known to be 1 byte
+	reader, err := NewFileReader(toc, ".no.prefetch.landmark", r)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("failed to read small file: %v", err)
+	}
+
+	fileEntries := toc.FileEntries()
+	entry := fileEntries[".no.prefetch.landmark"]
+
+	if int64(len(data)) != entry.Size {
+		t.Errorf("read %d bytes, expected %d", len(data), entry.Size)
+	}
+
+	t.Logf("Small file content length: %d", len(data))
+}
+
+// TestFileReader_LargeFile tests reading large files
+func TestFileReader_LargeFile(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000001")
+	defer cleanup()
+
+	// lib/x86_64-linux-gnu/libc-2.24.so is usually large (>1MB)
+	reader, err := NewFileReader(toc, "lib/x86_64-linux-gnu/libc-2.24.so", r)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	defer reader.Close()
+
+	fileEntries := toc.FileEntries()
+	entry := fileEntries["lib/x86_64-linux-gnu/libc-2.24.so"]
+
+	t.Logf("Testing large file: %d bytes, %d chunks", entry.Size, len(entry.Chunks))
+
+	// Read in 64KB chunks
+	buf := make([]byte, 64*1024)
+	var totalRead int64
+	chunkCount := 0
+
+	for {
+		n, err := reader.Read(buf)
+		totalRead += int64(n)
+		chunkCount++
+
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read error at chunk %d: %v", chunkCount, err)
+		}
+	}
+
+	if totalRead != entry.Size {
+		t.Errorf("read %d bytes, expected %d", totalRead, entry.Size)
+	}
+
+	t.Logf("Read large file in %d chunks, total %d bytes", chunkCount, totalRead)
+}
+
+// TestFileReader_ConcurrentReaders tests multiple readers on same blob
+func TestFileReader_ConcurrentReaders(t *testing.T) {
+	toc, _, cleanup := loadTestDataLayer(t, "000001")
+	defer cleanup()
+
+	files := []string{"bin/dash", "bin/cat", "bin/ls"}
+
+	// Create separate readers for each file
+	var readers []*FileReader
+	for _, file := range files {
+		filePath := filepath.Join("../../testdata", "000001")
+		f, err := os.Open(filePath)
+		if err != nil {
+			t.Fatalf("failed to open file: %v", err)
+		}
+		defer f.Close()
+
+		reader, err := NewFileReader(toc, file, &fileReadSeekCloser{f})
+		if err != nil {
+			t.Fatalf("failed to create reader for %s: %v", file, err)
+		}
+		defer reader.Close()
+		readers = append(readers, reader)
+	}
+
+	// Read from all readers
+	fileEntries := toc.FileEntries()
+	for i, reader := range readers {
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			t.Errorf("failed to read from reader %d: %v", i, err)
+			continue
+		}
+
+		expectedSize := fileEntries[files[i]].Size
+		if int64(len(data)) != expectedSize {
+			t.Errorf("reader %d: read %d bytes, expected %d", i, len(data), expectedSize)
+		}
+	}
+}
+
+// TestFileReader_InvalidSeek tests error handling for invalid seeks
+func TestFileReader_InvalidSeek(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000001")
+	defer cleanup()
+
+	reader, err := NewFileReader(toc, "bin/dash", r)
+	if err != nil {
+		t.Fatalf("failed to create reader: %v", err)
+	}
+	defer reader.Close()
+
+	// Test negative seek from start
+	_, err = reader.Seek(-10, io.SeekStart)
+	if err == nil {
+		t.Error("expected error for negative seek from start")
+	}
+
+	// Test invalid whence
+	_, err = reader.Seek(0, 999)
+	if err == nil {
+		t.Error("expected error for invalid whence")
+	}
+}
+
+// TestFileReader_NotFound tests error handling for non-existent files
+func TestFileReader_NotFound(t *testing.T) {
+	toc, r, cleanup := loadTestDataLayer(t, "000001")
+	defer cleanup()
+	defer r.Close()
+
+	_, err := NewFileReader(toc, "does/not/exist.txt", r)
+	if err == nil {
+		t.Error("expected error for non-existent file")
+	}
+}
