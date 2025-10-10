@@ -14,13 +14,6 @@ import (
 	"github.com/opencontainers/go-digest"
 )
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // RemoteRegistryStorage coordinates manifest fetching and blob access against an OCI registry.
 type RemoteRegistryStorage struct {
 	httpClient *http.Client
@@ -63,6 +56,7 @@ func NewRemoteRegistryStorage(insecure bool) *RemoteRegistryStorage {
 	return &RemoteRegistryStorage{httpClient: client}
 }
 
+// WithCredential returns a new storage instance with credentials.
 func (c *RemoteRegistryStorage) WithCredential(username, password string) *RemoteRegistryStorage {
 	return &RemoteRegistryStorage{
 		httpClient: c.httpClient,
@@ -72,6 +66,7 @@ func (c *RemoteRegistryStorage) WithCredential(username, password string) *Remot
 	}
 }
 
+// NewStorage creates a blob storage instance for a specific repository.
 func (c *RemoteRegistryStorage) NewStorage(registry, repository string, manifest *Manifest) Storage {
 	return &registryBlobStorage{
 		client:     c,
@@ -85,6 +80,7 @@ func (c *RemoteRegistryStorage) NewStorage(registry, repository string, manifest
 	}
 }
 
+// GetManifest fetches the manifest for an image reference.
 func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string) (*Manifest, error) {
 	logger.Info("Fetching manifest for image: %s", imageRef)
 
@@ -97,105 +93,174 @@ func (c *RemoteRegistryStorage) GetManifest(ctx context.Context, imageRef string
 	url := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, registry, repository, tag)
 	logger.Debug("Manifest URL: %s", url)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Try anonymous request first - let server tell us auth requirements
+	manifest, err := c.fetchManifest(ctx, url)
+	if err == nil {
+		return manifest, nil
+	}
+
+	// Check if it's an auth error
+	if !isAuthError(err) {
+		return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
+	}
+
+	// Extract auth requirements and authenticate
+	wwwAuth := extractWWWAuth(err)
+	if err := c.authenticate(ctx, registry, repository, wwwAuth); err != nil {
+		return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
+	}
+
+	// Retry with authentication
+	manifest, err = c.fetchManifest(ctx, url)
 	if err != nil {
 		return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
+	}
+
+	// Handle OCI index - fetch the first platform-specific manifest
+	if len(manifest.Manifests) > 0 {
+		manifestDigest := manifest.Manifests[0].Digest
+		logger.Info("Image is an index; selecting first manifest: %s", manifestDigest)
+
+		indexURL := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, registry, repository, manifestDigest)
+		manifest, err = c.fetchManifest(ctx, indexURL)
+		if err != nil {
+			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
+		}
+	}
+
+	return manifest, nil
+}
+
+// fetchManifest performs a single manifest fetch request.
+func (c *RemoteRegistryStorage) fetchManifest(ctx context.Context, url string) (*Manifest, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
 	}
 
 	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
 	req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
 	req.Header.Add("Accept", "application/vnd.oci.image.index.v1+json")
-	// Don't send credentials on first request - let the server tell us what auth method to use
-	// c.applyAuth(req)
+
+	// Apply auth if we have it
+	c.applyAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		logger.Error("HTTP request failed: %v", err)
-		return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
-
-		// Check if it's Bearer token auth or Basic auth
-		if strings.HasPrefix(wwwAuth, "Bearer ") {
-			// Docker/OCI registry with token auth
-			token, err := c.getAuthToken(ctx, registry, repository, wwwAuth)
-			if err != nil {
-				logger.Error("Failed to get auth token: %v", err)
-				return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
-			}
-			c.authToken = token
-		} else if strings.HasPrefix(wwwAuth, "Basic ") {
-			// Harbor or other registries using Basic auth
-			if c.username == "" || c.password == "" {
-				return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("registry requires basic auth but no credentials provided"))
-			}
-			logger.Info("Using Basic authentication for registry")
-		} else {
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("unsupported auth scheme: %s", wwwAuth))
-		}
-
-		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
-		}
-		req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
-		req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
-		req.Header.Add("Accept", "application/vnd.oci.image.index.v1+json")
-		c.applyAuth(req)
-
-		resp, err = c.httpClient.Do(req)
-		if err != nil {
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
-		}
-		defer resp.Body.Close()
+		return nil, &authError{wwwAuth: wwwAuth}
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("registry returned %d: %s", resp.StatusCode, string(body)))
+		return nil, fmt.Errorf("registry returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var manifest Manifest
 	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
-		return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
-	}
-
-	if len(manifest.Manifests) > 0 {
-		manifestDigest := manifest.Manifests[0].Digest
-		logger.Info("Image is an index; selecting first manifest: %s", manifestDigest)
-
-		indexReq, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, registry, repository, manifestDigest), nil)
-		if err != nil {
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
-		}
-		indexReq.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
-		indexReq.Header.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json")
-		c.applyAuth(indexReq)
-
-		resp2, err := c.httpClient.Do(indexReq)
-		if err != nil {
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
-		}
-		defer resp2.Body.Close()
-
-		if resp2.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp2.Body)
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(fmt.Errorf("manifest request returned %d: %s", resp2.StatusCode, string(body)))
-		}
-
-		var manifest2 Manifest
-		if err := json.NewDecoder(resp2.Body).Decode(&manifest2); err != nil {
-			return nil, stargzerrors.ErrManifestFetch.WithDetail("imageRef", imageRef).WithCause(err)
-		}
-		manifest = manifest2
+		return nil, err
 	}
 
 	return &manifest, nil
 }
 
+// authenticate handles the authentication flow based on WWW-Authenticate header.
+func (c *RemoteRegistryStorage) authenticate(ctx context.Context, registry, repository, wwwAuth string) error {
+	if wwwAuth == "" {
+		return fmt.Errorf("no WWW-Authenticate header in 401 response")
+	}
+
+	// Bearer token authentication (Docker/Harbor/GitHub)
+	if strings.HasPrefix(wwwAuth, "Bearer ") {
+		token, err := c.getBearerToken(ctx, wwwAuth)
+		if err != nil {
+			return err
+		}
+		c.authToken = token
+		logger.Debug("Acquired bearer token (length: %d)", len(token))
+		return nil
+	}
+
+	// Basic authentication
+	if strings.HasPrefix(wwwAuth, "Basic ") {
+		if c.username == "" || c.password == "" {
+			return fmt.Errorf("registry requires basic auth but no credentials provided")
+		}
+		logger.Info("Using Basic authentication")
+		return nil
+	}
+
+	return fmt.Errorf("unsupported auth scheme: %s", wwwAuth)
+}
+
+// getBearerToken requests a bearer token from the auth service.
+func (c *RemoteRegistryStorage) getBearerToken(ctx context.Context, wwwAuth string) (string, error) {
+	params := parseWWWAuth(wwwAuth)
+
+	realm := params["realm"]
+	if realm == "" {
+		return "", fmt.Errorf("no realm in WWW-Authenticate header")
+	}
+
+	// Build token URL
+	tokenURL := realm
+	if service := params["service"]; service != "" {
+		tokenURL += "?service=" + service
+	}
+	if scope := params["scope"]; scope != "" {
+		if strings.Contains(tokenURL, "?") {
+			tokenURL += "&scope=" + scope
+		} else {
+			tokenURL += "?scope=" + scope
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", tokenURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	// Use Basic auth for token request if we have credentials
+	if c.username != "" && c.password != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var authResp struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
+		return "", err
+	}
+
+	token := authResp.Token
+	if token == "" {
+		token = authResp.AccessToken
+	}
+	if token == "" {
+		return "", fmt.Errorf("no token in auth response")
+	}
+
+	return token, nil
+}
+
+// applyAuth applies authentication to a request.
 func (c *RemoteRegistryStorage) applyAuth(req *http.Request) {
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
@@ -204,63 +269,7 @@ func (c *RemoteRegistryStorage) applyAuth(req *http.Request) {
 	}
 }
 
-func (c *RemoteRegistryStorage) getAuthToken(ctx context.Context, registry, repository, wwwAuthenticate string) (string, error) {
-	if !strings.HasPrefix(wwwAuthenticate, "Bearer ") {
-		return "", stargzerrors.ErrAuthFailed.WithCause(fmt.Errorf("unsupported auth scheme: %s", wwwAuthenticate))
-	}
-
-	params := make(map[string]string)
-	authStr := strings.TrimPrefix(wwwAuthenticate, "Bearer ")
-	parts := strings.Split(authStr, ",")
-	for _, part := range parts {
-		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
-		if len(kv) == 2 {
-			params[kv[0]] = strings.Trim(kv[1], "\"")
-		}
-	}
-
-	realm := params["realm"]
-	service := params["service"]
-	scope := params["scope"]
-
-	if realm == "" {
-		return "", stargzerrors.ErrAuthFailed.WithCause(fmt.Errorf("no realm in WWW-Authenticate header"))
-	}
-
-	tokenURL := fmt.Sprintf("%s?service=%s&scope=%s", realm, service, scope)
-	req, err := http.NewRequestWithContext(ctx, "GET", tokenURL, nil)
-	if err != nil {
-		return "", stargzerrors.ErrAuthFailed.WithCause(err)
-	}
-	c.applyAuth(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", stargzerrors.ErrAuthFailed.WithCause(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", stargzerrors.ErrAuthFailed.WithCause(fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body)))
-	}
-
-	var authResp struct {
-		Token       string `json:"token"`
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&authResp); err != nil {
-		return "", stargzerrors.ErrAuthFailed.WithCause(err)
-	}
-
-	token := authResp.Token
-	if token == "" {
-		token = authResp.AccessToken
-	}
-	logger.Debug("Received auth token (length: %d)", len(token))
-	return token, nil
-}
-
+// registryBlobStorage implements Storage for registry blobs.
 type registryBlobStorage struct {
 	client     *RemoteRegistryStorage
 	httpClient *http.Client
@@ -272,6 +281,7 @@ type registryBlobStorage struct {
 	authToken  string
 }
 
+// ListBlobs lists all blobs in the manifest.
 func (s *registryBlobStorage) ListBlobs(ctx context.Context) ([]BlobDescriptor, error) {
 	if s.manifest == nil {
 		return nil, fmt.Errorf("manifest not loaded for registry storage")
@@ -292,70 +302,61 @@ func (s *registryBlobStorage) ListBlobs(ctx context.Context) ([]BlobDescriptor, 
 	return blobs, nil
 }
 
+// ReadBlob reads a range of bytes from a blob.
 func (s *registryBlobStorage) ReadBlob(ctx context.Context, blobDigest digest.Digest, offset int64, length int64) (io.ReadCloser, error) {
 	if offset < 0 {
 		return nil, fmt.Errorf("offset must be non-negative")
 	}
 
-	logger.Debug("ReadBlob: digest=%s, authToken length=%d, username=%s", blobDigest.String()[:min(20, len(blobDigest.String()))], len(s.authToken), s.username)
 	url := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", getScheme(s.registry), s.registry, s.repository, blobDigest.String())
+
+	// Try with existing auth (reuse token from manifest fetch)
+	body, err := s.fetchBlobRange(ctx, url, offset, length)
+	if err == nil {
+		return body, nil
+	}
+
+	// Check if it's an auth error
+	if !isAuthError(err) {
+		return nil, err
+	}
+
+	// Need to authenticate
+	wwwAuth := extractWWWAuth(err)
+	if err := s.authenticate(ctx, wwwAuth); err != nil {
+		return nil, err
+	}
+
+	// Retry with authentication
+	return s.fetchBlobRange(ctx, url, offset, length)
+}
+
+// fetchBlobRange performs a single blob range request.
+func (s *registryBlobStorage) fetchBlobRange(ctx context.Context, url string, offset, length int64) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 
+	// Set range header
 	if length > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 	} else {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
-	// Don't send credentials on first request - let the server tell us what auth method to use
-	// s.applyAuth(req)
+
+	// Apply auth if we have it
+	s.applyAuth(req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
-	logger.Debug("ReadBlob: first request status=%d", resp.StatusCode)
 	if resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		logger.Debug("ReadBlob: got 401, WWW-Authenticate=%s", wwwAuth[:min(50, len(wwwAuth))])
-
-		// Check if it's Bearer token auth or Basic auth
-		if strings.HasPrefix(wwwAuth, "Bearer ") {
-			logger.Debug("ReadBlob: using Bearer auth, getting token...")
-			token, err := s.client.getAuthToken(ctx, s.registry, s.repository, wwwAuth)
-			if err != nil {
-				return nil, fmt.Errorf("auth failed: %w", err)
-			}
-			s.authToken = token
-			logger.Debug("ReadBlob: got token, length=%d, saved to s.authToken", len(token))
-		} else if strings.HasPrefix(wwwAuth, "Basic ") {
-			if s.username == "" || s.password == "" {
-				return nil, fmt.Errorf("registry requires basic auth but no credentials provided")
-			}
-		} else {
-			return nil, fmt.Errorf("unsupported auth scheme: %s", wwwAuth)
-		}
-
-		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, err
-		}
-		if length > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
-		} else {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
-		}
-		s.applyAuth(req)
-
-		resp, err = s.httpClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		logger.Debug("ReadBlob: second request status=%d", resp.StatusCode)
+		return nil, &authError{wwwAuth: wwwAuth}
 	}
 
 	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
@@ -367,18 +368,45 @@ func (s *registryBlobStorage) ReadBlob(ctx context.Context, blobDigest digest.Di
 	return resp.Body, nil
 }
 
+// authenticate handles the authentication flow for blob storage.
+func (s *registryBlobStorage) authenticate(ctx context.Context, wwwAuth string) error {
+	if wwwAuth == "" {
+		return fmt.Errorf("no WWW-Authenticate header in 401 response")
+	}
+
+	// Bearer token authentication
+	if strings.HasPrefix(wwwAuth, "Bearer ") {
+		token, err := s.client.getBearerToken(ctx, wwwAuth)
+		if err != nil {
+			return fmt.Errorf("auth failed: %w", err)
+		}
+		s.authToken = token
+		return nil
+	}
+
+	// Basic authentication
+	if strings.HasPrefix(wwwAuth, "Basic ") {
+		if s.username == "" || s.password == "" {
+			return fmt.Errorf("registry requires basic auth but no credentials provided")
+		}
+		return nil
+	}
+
+	return fmt.Errorf("unsupported auth scheme: %s", wwwAuth)
+}
+
+// applyAuth applies authentication to a request.
 func (s *registryBlobStorage) applyAuth(req *http.Request) {
 	if s.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.authToken)
-		logger.Debug("registryBlobStorage.applyAuth: applied Bearer token, length=%d", len(s.authToken))
 	} else if s.username != "" && s.password != "" {
 		req.SetBasicAuth(s.username, s.password)
-		logger.Debug("registryBlobStorage.applyAuth: applied Basic auth for user=%s", s.username)
-	} else {
-		logger.Debug("registryBlobStorage.applyAuth: NO auth applied (no token, no username)")
 	}
 }
 
+// Helper functions
+
+// parseImageRef parses an image reference into registry, repository, and tag.
 func parseImageRef(imageRef string) (string, string, string, error) {
 	parts := strings.SplitN(imageRef, "/", 2)
 	if len(parts) < 2 {
@@ -395,6 +423,7 @@ func parseImageRef(imageRef string) (string, string, string, error) {
 	return registry, repoParts[0], repoParts[1], nil
 }
 
+// getScheme returns http or https based on the registry host.
 func getScheme(registry string) string {
 	host := registry
 	if idx := strings.Index(registry, ":"); idx != -1 {
@@ -404,4 +433,46 @@ func getScheme(registry string) string {
 		return "http"
 	}
 	return "https"
+}
+
+// parseWWWAuth parses WWW-Authenticate header into a map of parameters.
+func parseWWWAuth(wwwAuth string) map[string]string {
+	params := make(map[string]string)
+
+	// Remove "Bearer " prefix
+	authStr := strings.TrimPrefix(wwwAuth, "Bearer ")
+
+	// Parse key=value pairs
+	parts := strings.Split(authStr, ",")
+	for _, part := range parts {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) == 2 {
+			params[kv[0]] = strings.Trim(kv[1], "\"")
+		}
+	}
+
+	return params
+}
+
+// authError represents an authentication error with WWW-Authenticate header.
+type authError struct {
+	wwwAuth string
+}
+
+func (e *authError) Error() string {
+	return "authentication required"
+}
+
+// isAuthError checks if an error is an authentication error.
+func isAuthError(err error) bool {
+	_, ok := err.(*authError)
+	return ok
+}
+
+// extractWWWAuth extracts the WWW-Authenticate header from an auth error.
+func extractWWWAuth(err error) string {
+	if authErr, ok := err.(*authError); ok {
+		return authErr.wwwAuth
+	}
+	return ""
 }
